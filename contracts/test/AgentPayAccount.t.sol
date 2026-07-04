@@ -4,10 +4,12 @@ pragma solidity ^0.8.24;
 import {AgentPayAccount} from "../src/AgentPayAccount.sol";
 
 interface Vm {
+    function assume(bool condition) external;
     function deal(address account, uint256 balance) external;
     function expectEmit(bool checkTopic1, bool checkTopic2, bool checkTopic3, bool checkData) external;
     function expectRevert(bytes calldata revertData) external;
     function prank(address sender) external;
+    function warp(uint256 newTimestamp) external;
 }
 
 contract MiniTest {
@@ -78,6 +80,16 @@ contract MockContractTarget {
     function pay(address token, address recipient, uint256 amount) external payable {
         MockERC20(token).transferFrom(msg.sender, recipient, amount);
         emit ContractCalled(token, recipient, amount, msg.value);
+    }
+}
+
+contract RevertingTarget {
+    function route(address, address, uint256) external pure {
+        revert("target failed");
+    }
+
+    function pay(address, address, uint256) external pure {
+        revert("target failed");
     }
 }
 
@@ -273,6 +285,53 @@ contract AgentPayAccountTest is MiniTest {
         account.executeRoutePayment{value: 2 wei}(intent, routeCalldata);
     }
 
+    function testDirectPaymentRejectsZeroAmount() public {
+        vm.prank(executor);
+        vm.expectRevert(abi.encodeWithSelector(AgentPayAccount.InvalidAmount.selector));
+        account.executeDirectPayment(directIntent(1, 0));
+    }
+
+    function testDirectPaymentRejectsZeroRecipient() public {
+        AgentPayAccount.DirectPaymentIntent memory intent = AgentPayAccount.DirectPaymentIntent({
+            token: address(token), recipient: address(0), amount: 100, nonce: 1, deadline: block.timestamp + 1
+        });
+
+        vm.prank(executor);
+        vm.expectRevert(abi.encodeWithSelector(AgentPayAccount.InvalidRecipient.selector));
+        account.executeDirectPayment(intent);
+    }
+
+    function testRouteExecutionRejectsZeroAmountOut() public {
+        bytes memory routeCalldata = abi.encodeCall(MockRouteTarget.route, (address(token), recipient, 100));
+        AgentPayAccount.RoutePaymentIntent memory intent = AgentPayAccount.RoutePaymentIntent({
+            sourceToken: address(token),
+            maxAmountIn: 100,
+            destinationChainId: 8453,
+            recipient: recipient,
+            amountOut: 0,
+            routeTarget: address(routeTarget),
+            routeCalldataHash: keccak256(routeCalldata),
+            maxNativeFee: 0,
+            nonce: 1,
+            deadline: block.timestamp + 1
+        });
+
+        vm.prank(executor);
+        vm.expectRevert(abi.encodeWithSelector(AgentPayAccount.InvalidAmount.selector));
+        account.executeRoutePayment(intent, routeCalldata);
+    }
+
+    function testContractCallRejectsNativeFeeAboveMax() public {
+        bytes memory callData = abi.encodeCall(MockContractTarget.pay, (address(token), recipient, 100));
+        AgentPayAccount.ContractCallIntent memory intent =
+            contractCallIntent(1, address(contractTarget), callData, 100, 1 wei);
+
+        vm.deal(executor, 1 ether);
+        vm.prank(executor);
+        vm.expectRevert(abi.encodeWithSelector(AgentPayAccount.NativeFeeTooHigh.selector, 2 wei, 1 wei));
+        account.executeContractCall{value: 2 wei}(intent, callData);
+    }
+
     function testDirectPaymentTransfersCorrectAmount() public {
         vm.prank(executor);
         account.executeDirectPayment(directIntent(1, 100));
@@ -300,6 +359,28 @@ contract AgentPayAccountTest is MiniTest {
         assertEq(token.allowance(address(account), address(routeTarget)), 0);
     }
 
+    function testRoutePaymentFailureRollsBackNonceAllowanceAndBalance() public {
+        RevertingTarget failingTarget = new RevertingTarget();
+        vm.prank(owner);
+        account.setAllowedRouteTarget(address(failingTarget), true);
+
+        bytes memory routeCalldata = abi.encodeCall(RevertingTarget.route, (address(token), recipient, 100));
+        AgentPayAccount.RoutePaymentIntent memory intent = routeIntent(1, address(failingTarget), routeCalldata, 100, 0);
+
+        vm.prank(executor);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AgentPayAccount.ExternalCallFailed.selector, abi.encodeWithSignature("Error(string)", "target failed")
+            )
+        );
+        account.executeRoutePayment(intent, routeCalldata);
+
+        assertFalse(account.usedNonces(1));
+        assertEq(token.allowance(address(account), address(failingTarget)), 0);
+        assertEq(token.balanceOf(address(account)), 1_000_000);
+        assertEq(token.balanceOf(recipient), 0);
+    }
+
     function testRoutePaymentEmitsEvent() public {
         bytes memory routeCalldata = abi.encodeCall(MockRouteTarget.route, (address(token), recipient, 100));
         AgentPayAccount.RoutePaymentIntent memory intent = routeIntent(1, address(routeTarget), routeCalldata, 120, 0);
@@ -321,6 +402,29 @@ contract AgentPayAccountTest is MiniTest {
 
         assertEq(token.balanceOf(recipient), 100);
         assertEq(token.allowance(address(account), address(contractTarget)), 0);
+    }
+
+    function testContractCallFailureRollsBackNonceAllowanceAndBalance() public {
+        RevertingTarget failingTarget = new RevertingTarget();
+        vm.prank(owner);
+        account.setAllowedRouteTarget(address(failingTarget), true);
+
+        bytes memory callData = abi.encodeCall(RevertingTarget.pay, (address(token), recipient, 100));
+        AgentPayAccount.ContractCallIntent memory intent =
+            contractCallIntent(1, address(failingTarget), callData, 100, 0);
+
+        vm.prank(executor);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AgentPayAccount.ExternalCallFailed.selector, abi.encodeWithSignature("Error(string)", "target failed")
+            )
+        );
+        account.executeContractCall(intent, callData);
+
+        assertFalse(account.usedNonces(1));
+        assertEq(token.allowance(address(account), address(failingTarget)), 0);
+        assertEq(token.balanceOf(address(account)), 1_000_000);
+        assertEq(token.balanceOf(recipient), 0);
     }
 
     function testContractCallRejectsUnallowedTarget() public {
@@ -394,6 +498,100 @@ contract AgentPayAccountTest is MiniTest {
         account.executeDirectPayment(intent);
     }
 
+    function testFuzzDirectPaymentTransfersExactAmountAndConsumesNonce(
+        uint256 nonce,
+        uint256 rawAmount,
+        address fuzzRecipient
+    ) public {
+        vm.assume(fuzzRecipient != address(0));
+        vm.assume(fuzzRecipient != address(account));
+
+        uint256 amount = bound(rawAmount, 1, 1_000_000);
+        uint256 accountBalanceBefore = token.balanceOf(address(account));
+        uint256 recipientBalanceBefore = token.balanceOf(fuzzRecipient);
+        AgentPayAccount.DirectPaymentIntent memory intent = AgentPayAccount.DirectPaymentIntent({
+            token: address(token), recipient: fuzzRecipient, amount: amount, nonce: nonce, deadline: block.timestamp + 1
+        });
+
+        vm.prank(executor);
+        account.executeDirectPayment(intent);
+
+        assertTrue(account.usedNonces(nonce));
+        assertEq(token.balanceOf(fuzzRecipient), recipientBalanceBefore + amount);
+        assertEq(token.balanceOf(address(account)), accountBalanceBefore - amount);
+    }
+
+    function testFuzzDirectPaymentRejectsAmountAboveBalance(uint256 nonce, uint256 rawExtra) public {
+        uint256 extra = bound(rawExtra, 1, 1_000_000);
+        uint256 amount = 1_000_000 + extra;
+
+        vm.prank(executor);
+        vm.expectRevert(
+            abi.encodeWithSelector(AgentPayAccount.InsufficientTokenBalance.selector, address(token), amount, 1_000_000)
+        );
+        account.executeDirectPayment(directIntent(nonce, amount));
+    }
+
+    function testFuzzDirectPaymentRejectsPastDeadlines(uint256 nonce, uint256 rawAge) public {
+        uint256 currentTimestamp = 1_000_000_000;
+        uint256 age = bound(rawAge, 1, 365 days);
+        vm.warp(currentTimestamp);
+
+        AgentPayAccount.DirectPaymentIntent memory intent = AgentPayAccount.DirectPaymentIntent({
+            token: address(token), recipient: recipient, amount: 100, nonce: nonce, deadline: currentTimestamp - age
+        });
+
+        vm.prank(executor);
+        vm.expectRevert(abi.encodeWithSelector(AgentPayAccount.DeadlineExpired.selector, currentTimestamp - age));
+        account.executeDirectPayment(intent);
+    }
+
+    function testFuzzRoutePaymentSpendsOnlyCalledAmountAndResetsAllowance(
+        uint256 nonce,
+        uint256 rawSpendAmount,
+        uint256 rawMaxAmountIn
+    ) public {
+        uint256 spendAmount = bound(rawSpendAmount, 1, 1_000_000);
+        uint256 maxAmountIn = bound(rawMaxAmountIn, spendAmount, 1_000_000);
+        bytes memory routeCalldata = abi.encodeCall(MockRouteTarget.route, (address(token), recipient, spendAmount));
+        AgentPayAccount.RoutePaymentIntent memory intent = AgentPayAccount.RoutePaymentIntent({
+            sourceToken: address(token),
+            maxAmountIn: maxAmountIn,
+            destinationChainId: 8453,
+            recipient: recipient,
+            amountOut: spendAmount,
+            routeTarget: address(routeTarget),
+            routeCalldataHash: keccak256(routeCalldata),
+            maxNativeFee: 0,
+            nonce: nonce,
+            deadline: block.timestamp + 1
+        });
+
+        vm.prank(executor);
+        account.executeRoutePayment(intent, routeCalldata);
+
+        assertTrue(account.usedNonces(nonce));
+        assertEq(token.balanceOf(recipient), spendAmount);
+        assertEq(token.balanceOf(address(account)), 1_000_000 - spendAmount);
+        assertEq(token.allowance(address(account), address(routeTarget)), 0);
+    }
+
+    function testStressExecutesManySequentialDirectPaymentsWithUniqueNonces() public {
+        uint256 paymentCount = 128;
+
+        for (uint256 index = 0; index < paymentCount; index++) {
+            uint256 nonce = index + 1;
+
+            vm.prank(executor);
+            account.executeDirectPayment(directIntent(nonce, 1));
+
+            assertTrue(account.usedNonces(nonce));
+        }
+
+        assertEq(token.balanceOf(recipient), paymentCount);
+        assertEq(token.balanceOf(address(account)), 1_000_000 - paymentCount);
+    }
+
     function directIntent(uint256 nonce, uint256 amount)
         private
         view
@@ -441,5 +639,10 @@ contract AgentPayAccountTest is MiniTest {
             nonce: nonce,
             deadline: block.timestamp + 1
         });
+    }
+
+    function bound(uint256 value, uint256 min, uint256 max) private pure returns (uint256) {
+        require(min <= max, "invalid bound");
+        return min + (value % (max - min + 1));
     }
 }
