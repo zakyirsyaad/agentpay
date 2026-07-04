@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const require = createRequire(import.meta.url);
 const sourceEntrypoint = resolve(dirname(fileURLToPath(import.meta.url)), "../src/index.ts");
-const child = spawn(process.execPath, ["--import", "tsx", sourceEntrypoint, ...process.argv.slice(2)], {
+const tsxLoader = require.resolve("tsx");
+const child = spawn(process.execPath, ["--import", tsxLoader, sourceEntrypoint, ...process.argv.slice(2)], {
   env: process.env,
   stdio: "inherit",
 });

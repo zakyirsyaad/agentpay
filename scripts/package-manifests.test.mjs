@@ -135,4 +135,12 @@ describe("publishable AgentPay package manifests", () => {
 
     assert.equal(manifest.bin?.agentpay, "dist/index.js");
   });
+
+  it("keeps the published CLI wrapper resolving tsx from its package dependency", async () => {
+    const wrapper = await readFile("packages/cli/dist/index.js", "utf8");
+
+    assert.match(wrapper, /createRequire\(import\.meta\.url\)/);
+    assert.match(wrapper, /require\.resolve\("tsx"\)/);
+    assert.doesNotMatch(wrapper, /\["--import", "tsx"/);
+  });
 });
