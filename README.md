@@ -1,83 +1,131 @@
 # AgentPay
 
-AgentPay is a chat-approved stablecoin payment layer for AI agents, starting from BNB Chain with direct same-chain transfers and LI.FI swap/bridge routes.
+Chat-approved stablecoin payments for AI agents.
 
-`AGENTPAY_CONCEPT.md` remains the product and architecture source of truth. This repository implements the plugin-first, MCP-first AgentPay runtime with:
+AgentPay is a plugin-first, MCP-first payment runtime that lets an AI agent prepare BNB Chain stablecoin payments while the human keeps approval authority in chat. It supports direct same-chain USDT/USDC transfers, LI.FI swap and bridge routes, invoice parsing, x402 payment normalization, guarded same-chain contract calls, and audit-friendly payment tracking.
 
-- `apps/mcp-server` for agent-facing MCP tools.
-- `apps/setup-web` for wallet setup and signing.
-- `packages/cli` for `npx @agentpay-ai/agentpay install`.
-- `packages/skill` for the AgentPay `SKILL.md` behavior pack.
-- `packages/shared` for shared types, chain metadata, tokens, and validation.
-- `contracts` for the AgentPay smart account.
-- `supabase/migrations` for offchain intent and audit storage.
+`AGENTPAY_CONCEPT.md` is the product blueprint. This repository contains the working TypeScript, Solidity, Supabase, and npm package implementation.
 
-## Commands
+## Quick Start
+
+Install AgentPay into a Codex, Claude, Cursor, Hermes, or generic MCP runtime:
+
+```bash
+npx @agentpay-ai/agentpay install
+```
+
+The installer detects the target runtime when possible, accepts `--runtime codex|claude|cursor|generic|hermes`, writes `~/.agentpay/config.json`, installs runtime MCP config, copies `skills/agentpay/SKILL.md`, and bundles `AgentPayAccount.bin`.
+
+Fill the generated config with Supabase, RPC, executor, and setup deployer values, then reload or reconnect the agent runtime if needed. After that, return to chat and ask naturally:
+
+```txt
+Create an AgentPay wallet for me on BNB testnet.
+```
+
+## Chat Flow
+
+Wallet setup is driven from chat:
+
+1. The user asks the agent to create an AgentPay wallet.
+2. The agent calls `prepare_wallet_creation` and sends the setup signing link.
+3. The user signs in the browser wallet. This proves ownership only; it does not approve a payment.
+4. The agent calls `check_wallet_creation`.
+5. The agent returns the AgentPay smart account address.
+6. The user funds that smart account with supported USDT/USDC.
+
+Payments also stay in chat:
+
+1. The user asks to pay a wallet, invoice, x402 prompt, route, or supported contract call.
+2. The agent checks balance, parses inputs, quotes routes when useful, and calls `prepare_payment` or `prepare_contract_call`.
+3. The agent shows recipient, amount, token, chain, route, max spend, max native fee, deadline, purpose, and the exact approval phrase.
+4. The user must reply with the exact phrase, for example `APPROVE pay_123`.
+5. The agent calls `execute_payment`, then `track_payment`, and reports transaction status.
+
+Vague confirmations such as `yes`, `ok`, `go`, or `send it` are rejected.
+
+## Safety Model
+
+AgentPay separates ownership from execution.
+
+- Owner: the user's wallet that signs setup and submits admin transactions. Only the owner can pause, unpause, rotate the executor, allowlist tokens or route targets, cancel nonces, and withdraw funds.
+- Executor: the relayer wallet that submits prepared payment transactions. It can execute only through AgentPay's guarded smart account methods and only after exact chat approval.
+- Smart account guards: token allowlists, route-target allowlists, nonce checks, deadlines, max token spend, max native fee, calldata hash checks, balance checks, pause control, and approval reset after guarded calls.
+- Offchain guards: Supabase stores setup intents, payment intents, approval phrases, status transitions, and `payment_events` audit history.
+- x402 support is normalization only unless the merchant accepts direct/custom settlement. Standard x402 exact settlement still needs a protocol `PAYMENT-SIGNATURE`.
+
+`doctor` and `setup-web` are helper commands, not the main user flow. Use `npx @agentpay-ai/agentpay doctor` for diagnostics and `npx @agentpay-ai/agentpay setup-web` only as a fallback when the setup page needs to be served manually.
+
+## Repository Layout
+
+- `apps/mcp-server/` - AgentPay MCP tools, runtime wiring, Supabase, Ethers, and LI.FI adapters.
+- `apps/setup-web/` - setup/signing web server for wallet ownership proof and account deployment.
+- `packages/cli/` - published `@agentpay-ai/agentpay` installer and runtime templates.
+- `packages/skill/` - AgentPay `SKILL.md` and OpenAI/Codex metadata.
+- `packages/shared/` - schemas, chain/token metadata, approval helpers, and intent types.
+- `contracts/` - Foundry smart account, deploy scripts, and Solidity tests.
+- `supabase/migrations/` - tables, indexes, RLS, setup intents, payment intents, wallets, and audit events.
+- `docs/` - architecture, security model, demo flow, release handoff, and launch checklist.
+
+## Development Commands
+
+Use workspace-specific tests while iterating, then run the full checks before handoff.
 
 ```bash
 npm test
 npm run typecheck
+npm run build
 npm run demo:local
-npm run contracts:bytecode
 npm run release:smoke
-npm run contracts:deploy:bnb
-npx @agentpay-ai/agentpay doctor
-npx @agentpay-ai/agentpay setup-web
+npm audit --audit-level=high
+```
+
+Useful targeted commands:
+
+```bash
 npm --workspace @agentpay-ai/mcp-server test
 npm --workspace @agentpay-ai/setup-web test
+npm --workspace @agentpay-ai/agentpay test
 cd contracts && forge test
+cd contracts && forge fmt --check
 ```
 
-Use workspace tests while iterating on one package, then run `npm test` and `npm run typecheck` before handing off changes.
+`npm run demo:local` runs an in-memory wallet setup and chat-approved payment flow with no Supabase, RPC credentials, or private keys.
 
-`npm run demo:local` runs a deterministic in-memory AgentPay flow with the real runtime tools: wallet setup intent, setup completion, wallet lookup, balance, invoice parsing, x402 parsing, LI.FI-style quote, `prepare_payment`, exact approval, `execute_payment`, `track_payment`, transaction history, and payment events. It does not need Supabase, RPC credentials, or private keys.
+`npm run release:smoke` packs `@agentpay-ai/skill`, `@agentpay-ai/shared`, `@agentpay-ai/mcp-server`, `@agentpay-ai/setup-web`, and `@agentpay-ai/agentpay` into local tarballs, installs them into a temporary project, runs `npx @agentpay-ai/agentpay install`, and verifies `agentpay doctor` with dummy non-secret config. Run it before publishing npm packages.
 
-`npm run release:smoke` packs `@agentpay-ai/skill`, `@agentpay-ai/shared`, `@agentpay-ai/mcp-server`, `@agentpay-ai/setup-web`, and `@agentpay-ai/agentpay` into local tarballs, installs them into a temporary project, runs `npx @agentpay-ai/agentpay install`, and verifies `npx @agentpay-ai/agentpay doctor` with dummy non-secret config. Run it before publishing npm packages.
+## Configuration
 
-Use `docs/release-handoff.md` for the current local readiness summary, then `docs/launch-checklist.md` for the remaining external launch steps: Supabase project setup, BNB Chain testnet deployment, npm publish order, and demo video capture.
+The generated config and server environment use these core values:
 
-## Local Runtime Configuration
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `BNB_RPC_URL`
+- `EXECUTOR_PRIVATE_KEY`
+- `SETUP_DEPLOYER_PRIVATE_KEY`
+- `AGENTPAY_ACCOUNT_BYTECODE_PATH` or `AGENTPAY_ACCOUNT_BYTECODE`
 
-`npx @agentpay-ai/agentpay install` detects the target runtime from local project markers when possible, falls back to generic MCP instructions, and accepts `--runtime codex|claude|cursor|generic|hermes` when you want to choose explicitly. It writes an `AGENTPAY_CONFIG`-compatible JSON file, runtime-specific MCP instructions, `skills/agentpay/SKILL.md`, and the bundled smart account bytecode. The MCP server and setup web both read the generated config:
+Optional values include `SETUP_WEB_URL`, `LIFI_API_KEY`, `AGENTPAY_OWNER_ADDRESS`, `AGENTPAY_EXECUTOR_ADDRESS`, BNB testnet token overrides, `AGENTPAY_INITIAL_ROUTE_TARGETS`, and `SETUP_WEB_PORT`.
 
-```bash
-AGENTPAY_CONFIG=~/.agentpay/config.json npx @agentpay-ai/agentpay setup-web
-```
+Keep private keys and Supabase service-role keys server-side. Never paste secrets into chat.
 
-After filling `~/.agentpay/config.json`, run `npx @agentpay-ai/agentpay doctor` to check MCP and setup-web readiness without starting services or printing secret values.
+## Smart Account Deployment
 
-For setup web, fill `SETUP_DEPLOYER_PRIVATE_KEY` and either `AGENTPAY_ACCOUNT_BYTECODE` or `AGENTPAY_ACCOUNT_BYTECODE_PATH`. To generate a bytecode file from the Foundry artifact:
+The setup web flow deploys `AgentPayAccount` with BNB Chain USDC and USDT pre-allowed. Route targets are separate owner-controlled allowlist entries.
 
-```bash
-npm run contracts:bytecode
-```
-
-`npx @agentpay-ai/agentpay install` already writes `AgentPayAccount.bin` and points `AGENTPAY_ACCOUNT_BYTECODE_PATH` at it. Use `npm run contracts:bytecode` when developing contracts and refreshing the packaged bytecode asset.
-
-## Contract Deployment
-
-To deploy the standalone smart account with Foundry, set `BNB_RPC_URL`, `SETUP_DEPLOYER_PRIVATE_KEY`, `AGENTPAY_OWNER_ADDRESS`, and `AGENTPAY_EXECUTOR_ADDRESS`, then run:
+For standalone Foundry deployment, set `BNB_RPC_URL`, `SETUP_DEPLOYER_PRIVATE_KEY`, `AGENTPAY_OWNER_ADDRESS`, and `AGENTPAY_EXECUTOR_ADDRESS`, then run:
 
 ```bash
 npm run contracts:deploy:bnb
 ```
 
-The script deploys `AgentPayAccount` with BNB Chain USDC and USDT pre-allowed and no initial route targets. Allow route targets later with `prepare_route_target_allowance`, or use setup web when route targets must be configured during wallet creation.
+Use `npm run contracts:bytecode` when developing contracts and refreshing the packaged bytecode asset in `packages/cli/assets/AgentPayAccount.bin`.
 
-Wallet setup deploys `AgentPayAccount` with BNB Chain USDC and USDT pre-allowed so same-chain stablecoin payments can execute immediately after funding. Route targets remain separately allowlisted by the owner. To allow known LI.FI route targets at setup, set `AGENTPAY_INITIAL_ROUTE_TARGETS` to a comma-separated EVM address list before starting setup web. After setup, agents can call `check_route_target_allowance` and `prepare_route_target_allowance` to prepare the owner transaction for a new LI.FI target only when needed.
+## Published Packages
 
-Setup signing messages include the setup ID, owner context, executor address, BNB Chain, expiry, and a warning that the signature only proves wallet ownership. They never approve a payment or token transfer.
+- `@agentpay-ai/agentpay` - CLI installer and `agentpay` binary.
+- `@agentpay-ai/skill` - agent skill pack.
+- `@agentpay-ai/shared` - shared schemas and helpers.
+- `@agentpay-ai/mcp-server` - MCP server runtime and tools.
+- `@agentpay-ai/setup-web` - setup and signing web server.
 
-Payment lifecycle changes are written to `payment_events`. Use `list_payment_events` with a payment intent ID to inspect audit history, failure details, and status transitions.
-
-`quote_payment_route`, `prepare_payment`, and `prepare_contract_call` check the AgentPay wallet source-token balance before returning approval instructions. If the wallet is underfunded, top it up and prepare a fresh intent instead of asking for approval.
-
-`execute_payment` claims an approved intent in storage before submitting the relayer transaction. Concurrent approval submissions for the same intent can only claim once, which prevents duplicate on-chain sends.
-
-Invoice payments can start with `parse_invoice_payment`, which accepts structured invoice JSON or simple `key: value` invoice text and returns normalized `prepare_payment` fields for user review. Parser outputs include `paymentType` so prepared intents remain auditable as wallet, invoice, or x402 payments in `list_transactions`.
-
-x402 payment prompts can start with `parse_x402_payment_required`, which accepts a v2 `PAYMENT-REQUIRED` object, JSON string, or base64 header and returns normalized `prepare_payment` fields. AgentPay can prepare the stablecoin transfer, but standard x402 exact endpoints still require a `PAYMENT-SIGNATURE` from an x402-capable signer unless the merchant supports direct/custom settlement.
-
-Same-chain contract payments can use `prepare_contract_call` when the user has confirmed the target address, calldata, max token spend, max native fee, and purpose. The smart account enforces target allowlisting, calldata hash, max token spend, max native fee, nonce, deadline, and token allowance reset after the call.
-
-Owner controls use `prepare_account_admin_transaction` to prepare pause, unpause, executor rotation, nonce cancellation, token allowlist, and withdrawal transactions. The owner wallet must still review and submit the returned transaction.
+See `docs/release-handoff.md` for local readiness and `docs/launch-checklist.md` for external launch steps such as Supabase setup, BNB testnet deployment, npm publishing, and demo capture.
