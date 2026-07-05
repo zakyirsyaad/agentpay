@@ -8,7 +8,7 @@ Use this package when building AgentPay-compatible tools that need the same vali
 
 - Approval phrase parsing and payment intent types.
 - X Layer stablecoin metadata and balance helpers.
-- Wallet setup, invoice, x402, account admin, and payment tracking schemas.
+- Wallet setup, invoice, x402, account admin, and payment tracking schemas, including x402 `PAYMENT-RESPONSE` and `payment-identifier` proof helpers.
 - Route calldata hashing helpers used by guarded contract calls.
 
 ## Example

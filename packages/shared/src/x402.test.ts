@@ -33,6 +33,21 @@ const basePaymentRequired = {
   extensions: {},
 };
 
+const paymentIdentifierExtension = {
+  "payment-identifier": {
+    info: {
+      required: false,
+    },
+    schema: {
+      type: "object",
+      properties: {
+        required: { type: "boolean" },
+        id: { type: "string" },
+      },
+    },
+  },
+};
+
 describe("parseX402PaymentRequired", () => {
   it("decodes a v2 PAYMENT-REQUIRED header into prepare_payment fields", () => {
     const paymentRequired = Buffer.from(JSON.stringify(basePaymentRequired), "utf8").toString("base64");
@@ -189,6 +204,61 @@ describe("AgentPay x402 payment proof", () => {
       destinationTxHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       settlementTxHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       completedAt: "2026-07-03T12:02:00.000Z",
+    });
+  });
+
+  it("adds the payment-identifier extension when the x402 server advertises idempotency support", () => {
+    const parsed = parseX402PaymentRequired({
+      paymentRequired: {
+        ...basePaymentRequired,
+        extensions: paymentIdentifierExtension,
+      },
+    });
+    const paymentIntentId = "pay_7d5d747be160e280504c099d984bcfe0";
+    const header = createAgentPayX402PaymentHeader({
+      parsed,
+      paymentIntent: {
+        id: paymentIntentId,
+        accountAddress: "0x3333333333333333333333333333333333333333",
+        ownerAddress: "0x2222222222222222222222222222222222222222",
+        status: "COMPLETED",
+        paymentType: "X402_PAYMENT",
+        sourceChainId: 196,
+        destinationChainId: 8453,
+        sourceTokenAddress: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+        sourceTokenSymbol: "USDT0",
+        destinationTokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        destinationTokenSymbol: "USDC",
+        recipientAddress: "0x1111111111111111111111111111111111111111",
+        amountOut: "0.01",
+        maxAmountIn: "0.011",
+        maxNativeFee: "0",
+        routeProvider: "LI.FI",
+        routeTarget: "0x7777777777777777777777777777777777777777",
+        routeCalldata: "0x1234",
+        routeCalldataHash: "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
+        routeSummary: "Route to Base.",
+        nonce: "42",
+        deadline: "2026-07-03T12:15:00.000Z",
+        purpose: "x402 payment for Market API: Premium market data",
+        approvalPhrase: "APPROVE pay_7d5d747be160e280504c099d984bcfe0",
+        sourceTxHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        destinationTxHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        createdAt: "2026-07-03T12:00:00.000Z",
+        completedAt: "2026-07-03T12:02:00.000Z",
+      },
+    });
+
+    const proof = decodeAgentPayX402PaymentHeader(header);
+
+    assert.equal(proof.paymentIdentifier, paymentIntentId);
+    assert.deepEqual(proof.extensions, {
+      "payment-identifier": {
+        info: {
+          required: false,
+          id: paymentIntentId,
+        },
+      },
     });
   });
 

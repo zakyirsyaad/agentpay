@@ -146,7 +146,7 @@ When an HTTP endpoint returns an x402 v2 `PAYMENT-REQUIRED` response:
 5. After `execute_payment` and `track_payment` return `COMPLETED`, call `retry_x402_request` with the original `PAYMENT-REQUIRED` object/header and the completed `paymentIntentId`.
 6. Return the protected resource response to the user when the retry succeeds.
 
-`retry_x402_request` attaches the AgentPay receipt proof as both `X-PAYMENT` and `PAYMENT-SIGNATURE`. Do not claim universal x402 exact facilitator compatibility unless the merchant supports this AgentPay receipt-proof bridge or the integration uses a native x402 signer/facilitator path.
+`retry_x402_request` attaches the AgentPay receipt proof as both `X-PAYMENT` and `PAYMENT-SIGNATURE`, reads V2 `PAYMENT-RESPONSE` with legacy `X-PAYMENT-RESPONSE` fallback, and adds `payment-identifier` idempotency data when the server advertises it. Do not claim universal x402 exact facilitator compatibility unless the merchant supports this AgentPay receipt-proof bridge or the integration uses a native x402 signer/facilitator path.
 
 ## Contract Call Workflow
 

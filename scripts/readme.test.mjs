@@ -95,6 +95,8 @@ describe("README", () => {
       const contents = await readFile(file, "utf8");
 
       assert.match(contents, /retry_x402_request|receipt-proof retry|receipt proof/i, `${file} must describe x402 retry`);
+      assert.match(contents, /PAYMENT-RESPONSE/, `${file} must mention the x402 V2 settlement response header`);
+      assert.match(contents, /payment-identifier/i, `${file} must mention x402 idempotency support`);
       assert.doesNotMatch(
         contents,
         /AgentPay can prepare the returned transfer, but standard x402 exact endpoints still require/i,

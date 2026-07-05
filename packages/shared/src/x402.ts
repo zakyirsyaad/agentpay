@@ -8,6 +8,8 @@ import { getStableTokenMetadata, STABLE_TOKEN_SYMBOLS, stableTokenSymbolSchema }
 import type { StableTokenSymbol } from "./tokens.ts";
 
 const positiveIntegerStringSchema = z.string().regex(/^[1-9]\d*$/, "Expected a positive integer string");
+const PAYMENT_IDENTIFIER = "payment-identifier";
+const paymentIdentifierSchema = z.string().regex(/^[A-Za-z0-9_-]{16,128}$/);
 
 export const parseX402PaymentRequiredInputSchema = z.object({
   paymentRequired: z.union([z.string().trim().min(1), z.record(z.string(), z.unknown())]),
@@ -95,6 +97,13 @@ export interface ParsedX402PaymentRequired {
     sourceTokenSymbol: StableTokenSymbol;
     paymentType: "X402_PAYMENT";
   };
+  extensions?: {
+    "payment-identifier"?: {
+      info: {
+        required: boolean;
+      };
+    };
+  };
   standardX402SignatureRequired: true;
 }
 
@@ -117,12 +126,22 @@ export interface AgentPayX402PaymentProof {
   destinationTxHash?: string;
   settlementTxHash: string;
   completedAt?: string;
+  paymentIdentifier?: string;
+  extensions?: {
+    "payment-identifier"?: {
+      info: {
+        required: boolean;
+        id: string;
+      };
+    };
+  };
 }
 
 export function parseX402PaymentRequired(rawInput: ParseX402PaymentRequiredInput): ParsedX402PaymentRequired {
   const input = parseX402PaymentRequiredInputSchema.parse(rawInput);
   const paymentRequired = x402PaymentRequiredSchema.parse(decodePaymentRequired(input.paymentRequired));
   const selected = paymentRequired.accepts.map(toSupportedRequirement).find((requirement) => requirement !== null);
+  const paymentIdentifierExtension = parsePaymentIdentifierExtension(paymentRequired.extensions);
 
   if (!selected) {
     throw new Error("No AgentPay-supported x402 payment requirement was found.");
@@ -158,6 +177,13 @@ export function parseX402PaymentRequired(rawInput: ParseX402PaymentRequiredInput
       sourceTokenSymbol: paymentInput.sourceTokenSymbol,
       paymentType: "X402_PAYMENT",
     },
+    ...(paymentIdentifierExtension
+      ? {
+          extensions: {
+            [PAYMENT_IDENTIFIER]: paymentIdentifierExtension,
+          },
+        }
+      : {}),
     standardX402SignatureRequired: true,
   };
 }
@@ -184,6 +210,8 @@ export function createAgentPayX402PaymentProof(request: {
   validateCompletedX402Intent(parsed, paymentIntent);
 
   const settlementTxHash = paymentIntent.destinationTxHash ?? paymentIntent.sourceTxHash;
+  const paymentIdentifierExtension = parsed.extensions?.[PAYMENT_IDENTIFIER];
+  const paymentIdentifier = paymentIdentifierExtension ? createPaymentIdentifier(paymentIntent.id) : undefined;
 
   return {
     x402Version: 2,
@@ -204,6 +232,19 @@ export function createAgentPayX402PaymentProof(request: {
     ...(paymentIntent.destinationTxHash ? { destinationTxHash: paymentIntent.destinationTxHash } : {}),
     settlementTxHash: settlementTxHash!,
     ...(paymentIntent.completedAt ? { completedAt: paymentIntent.completedAt } : {}),
+    ...(paymentIdentifier
+      ? {
+          paymentIdentifier,
+          extensions: {
+            [PAYMENT_IDENTIFIER]: {
+              info: {
+                required: paymentIdentifierExtension!.info.required,
+                id: paymentIdentifier,
+              },
+            },
+          },
+        }
+      : {}),
   };
 }
 
@@ -244,6 +285,19 @@ const agentPayX402PaymentProofSchema = z.object({
   destinationTxHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/).optional(),
   settlementTxHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
   completedAt: z.string().optional(),
+  paymentIdentifier: paymentIdentifierSchema.optional(),
+  extensions: z
+    .object({
+      "payment-identifier": z
+        .object({
+          info: z.object({
+            required: z.boolean(),
+            id: paymentIdentifierSchema,
+          }),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 function validateCompletedX402Intent(parsed: ParsedX402PaymentRequired, paymentIntent: PaymentIntentRecord): void {
@@ -274,6 +328,40 @@ function validateCompletedX402Intent(parsed: ParsedX402PaymentRequired, paymentI
 
 function encodeBase64UrlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function parsePaymentIdentifierExtension(
+  extensions: Record<string, unknown> | undefined,
+): ParsedX402PaymentRequired["extensions"] extends infer Extensions
+  ? Extensions extends { "payment-identifier"?: infer Extension }
+    ? Extension | undefined
+    : never
+  : never {
+  const extension = extensions?.[PAYMENT_IDENTIFIER];
+
+  if (extension === undefined) {
+    return undefined;
+  }
+
+  if (!extension || typeof extension !== "object") {
+    throw new Error("Unsupported x402 payment-identifier extension.");
+  }
+
+  const info = (extension as { info?: unknown }).info;
+
+  if (!info || typeof info !== "object" || typeof (info as { required?: unknown }).required !== "boolean") {
+    throw new Error("Unsupported x402 payment-identifier extension.");
+  }
+
+  return {
+    info: {
+      required: (info as { required: boolean }).required,
+    },
+  };
+}
+
+function createPaymentIdentifier(paymentIntentId: string): string {
+  return paymentIdentifierSchema.parse(paymentIntentId);
 }
 
 function toSupportedRequirement(requirement: z.infer<typeof x402PaymentRequirementSchema>):

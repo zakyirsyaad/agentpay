@@ -11,7 +11,7 @@ npx @agentpay-ai/agentpay mcp
 
 ## Tools
 
-The server exposes tools for wallet setup, balance checks, LI.FI route quotes, payment preparation, exact approval execution, payment tracking, invoice parsing, x402 parsing plus receipt-proof retry, route target allowance, and account admin transactions.
+The server exposes tools for wallet setup, balance checks, LI.FI route quotes, payment preparation, exact approval execution, payment tracking, invoice parsing, x402 parsing plus receipt-proof retry, route target allowance, and account admin transactions. The x402 retry path sends AgentPay proof as `X-PAYMENT` / `PAYMENT-SIGNATURE`, reads V2 `PAYMENT-RESPONSE`, falls back to `X-PAYMENT-RESPONSE`, and includes `payment-identifier` idempotency data when advertised.
 
 ## Programmatic Usage
 

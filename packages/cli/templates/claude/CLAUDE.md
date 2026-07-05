@@ -12,7 +12,7 @@ AgentPay supports X Layer mainnet and testnet. If the user does not clearly name
 
 For invoice payments, call `parse_invoice_payment`, show the parsed fields, and ask the user to confirm they match the invoice before preparing payment with the full returned `paymentInput`, including `paymentType`.
 
-For x402 v2 `PAYMENT-REQUIRED` responses, call `parse_x402_payment_required`, show the parsed resource and selected payment requirement, preserve `paymentType: "X402_PAYMENT"`, complete the normal exact-approval payment flow, then call `retry_x402_request` after `track_payment` returns `COMPLETED`. This attaches AgentPay receipt proof as `X-PAYMENT` and `PAYMENT-SIGNATURE`; do not claim universal x402 facilitator compatibility unless the merchant supports this AgentPay proof bridge.
+For x402 v2 `PAYMENT-REQUIRED` responses, call `parse_x402_payment_required`, show the parsed resource and selected payment requirement, preserve `paymentType: "X402_PAYMENT"`, complete the normal exact-approval payment flow, then call `retry_x402_request` after `track_payment` returns `COMPLETED`. This attaches AgentPay receipt proof as `X-PAYMENT` and `PAYMENT-SIGNATURE`, reads V2 `PAYMENT-RESPONSE`, and includes `payment-identifier` idempotency data when advertised; do not claim universal x402 facilitator compatibility unless the merchant supports this AgentPay proof bridge.
 
 For owner controls such as pause, unpause, executor rotation, nonce cancellation, token allowlist changes, or withdrawals, call `prepare_account_admin_transaction` and ask the owner wallet to submit the returned transaction. This is not payment approval.
 

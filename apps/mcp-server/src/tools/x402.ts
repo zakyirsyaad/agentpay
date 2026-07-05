@@ -74,7 +74,7 @@ export async function retryX402Request(
     ...(input.request.body !== undefined ? { body: input.request.body } : {}),
   });
   const bodyText = await response.text();
-  const paymentResponse = response.headers.get("x-payment-response") ?? undefined;
+  const paymentResponse = response.headers.get("payment-response") ?? response.headers.get("x-payment-response") ?? undefined;
 
   return {
     status: "RESOURCE_FETCHED",
@@ -160,6 +160,6 @@ function createRetryHeaders(inputHeaders: Record<string, string>, paymentHeader:
     ...headers,
     "X-PAYMENT": paymentHeader,
     "PAYMENT-SIGNATURE": paymentHeader,
-    "Access-Control-Expose-Headers": "X-PAYMENT-RESPONSE",
+    "Access-Control-Expose-Headers": "PAYMENT-RESPONSE, X-PAYMENT-RESPONSE",
   };
 }

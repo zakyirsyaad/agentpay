@@ -143,7 +143,8 @@ describe("retryX402Request", () => {
             status: 200,
             headers: {
               "content-type": "application/json",
-              "x-payment-response": "settled",
+              "payment-response": "settled-v2",
+              "x-payment-response": "settled-legacy",
             },
           });
         },
@@ -155,10 +156,13 @@ describe("retryX402Request", () => {
     assert.equal(fetchCalls[0]?.init.method, "GET");
     assert.equal((fetchCalls[0]?.init.headers as Record<string, string>)["X-PAYMENT"], output.paymentHeader);
     assert.equal((fetchCalls[0]?.init.headers as Record<string, string>)["PAYMENT-SIGNATURE"], output.paymentHeader);
-    assert.equal((fetchCalls[0]?.init.headers as Record<string, string>)["Access-Control-Expose-Headers"], "X-PAYMENT-RESPONSE");
+    assert.equal(
+      (fetchCalls[0]?.init.headers as Record<string, string>)["Access-Control-Expose-Headers"],
+      "PAYMENT-RESPONSE, X-PAYMENT-RESPONSE",
+    );
     assert.equal(output.status, "RESOURCE_FETCHED");
     assert.equal(output.httpStatus, 200);
-    assert.equal(output.paymentResponse, "settled");
+    assert.equal(output.paymentResponse, "settled-v2");
     assert.equal(output.bodyText, "{\"ok\":true}");
     assert.match(output.instructionToAgent, /retry succeeded/i);
   });

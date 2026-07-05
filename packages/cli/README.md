@@ -34,7 +34,7 @@ AgentPay supports X Layer mainnet and testnet. If you do not name one, the agent
 
 The agent should use AgentPay tools in chat to create the wallet setup link, check wallet creation, prepare payments, request the exact approval phrase, execute after exact approval, and track status.
 
-For x402 paid APIs, the agent parses the `PAYMENT-REQUIRED` response, runs the same exact-approval payment flow, then calls `retry_x402_request` to retry the protected resource with AgentPay receipt-proof headers.
+For x402 paid APIs, the agent parses the `PAYMENT-REQUIRED` response, runs the same exact-approval payment flow, then calls `retry_x402_request` to retry the protected resource with AgentPay receipt-proof headers. The retry reads V2 `PAYMENT-RESPONSE`, keeps legacy fallback, and includes `payment-identifier` idempotency data when the server advertises it.
 
 ## Commands
 

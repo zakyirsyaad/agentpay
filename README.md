@@ -52,7 +52,7 @@ AgentPay separates ownership from execution.
 - Executor: the relayer wallet that submits prepared payment transactions. It can execute only through AgentPay's guarded smart account methods and only after exact chat approval.
 - Smart account guards: token allowlists, route-target allowlists, nonce checks, deadlines, max token spend, max native fee, calldata hash checks, balance checks, pause control, and approval reset after guarded calls.
 - Offchain guards: Supabase stores setup intents, payment intents, approval phrases, status transitions, and `payment_events` audit history.
-- x402 support parses v2 `PAYMENT-REQUIRED`, executes an approved AgentPay payment, and can retry the protected resource with `X-PAYMENT` / `PAYMENT-SIGNATURE` headers containing an AgentPay receipt proof. Strict standard x402 exact endpoints must support that AgentPay receipt proof bridge or use their native signer/facilitator path.
+- x402 support parses v2 `PAYMENT-REQUIRED`, executes an approved AgentPay payment, and can retry the protected resource with `X-PAYMENT` / `PAYMENT-SIGNATURE` headers containing an AgentPay receipt proof. The retry reads the V2 `PAYMENT-RESPONSE` header, keeps legacy `X-PAYMENT-RESPONSE` fallback, and appends `payment-identifier` idempotency data when the server advertises it. Strict standard x402 exact endpoints must support that AgentPay receipt proof bridge or use their native signer/facilitator path.
 
 `doctor` and `setup-web` are helper commands, not the main user flow. Use `npx @agentpay-ai/agentpay doctor` for diagnostics and `npx @agentpay-ai/agentpay setup-web` only as a fallback when the setup page needs to be served manually.
 
