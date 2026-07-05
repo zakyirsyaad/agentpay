@@ -84,6 +84,7 @@ describe("publishable AgentPay package manifests", () => {
 
   it("declares runtime dependencies in the package that imports them", async () => {
     const rootManifest = await readPackageJson(".");
+    const skillManifest = await readPackageJson("packages/skill");
     const expectedDependencies = {
       "@agentpay-ai/shared": {
         "@noble/hashes": rootManifest.dependencies["@noble/hashes"],
@@ -97,7 +98,7 @@ describe("publishable AgentPay package manifests", () => {
         ethers: rootManifest.dependencies.ethers,
       },
       "@agentpay-ai/agentpay": {
-        "@agentpay-ai/skill": "0.1.2",
+        "@agentpay-ai/skill": skillManifest.version,
       },
     };
 

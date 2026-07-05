@@ -1,6 +1,6 @@
 {
   "name": "@agentpay-ai/mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -37,7 +37,7 @@
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentpay-ai/shared": "0.1.1",
+    "@agentpay-ai/shared": "0.1.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.110.0",
     "ethers": "^6.17.0"

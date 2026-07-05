@@ -1,6 +1,6 @@
 {
   "name": "@agentpay-ai/setup-web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -23,8 +23,8 @@
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentpay-ai/mcp-server": "0.1.1",
-    "@agentpay-ai/shared": "0.1.1",
+    "@agentpay-ai/mcp-server": "0.1.2",
+    "@agentpay-ai/shared": "0.1.2",
     "ethers": "^6.17.0"
   }
 }
