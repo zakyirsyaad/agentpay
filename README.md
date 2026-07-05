@@ -66,6 +66,8 @@ npx @agentpay-ai/agentpay serve-http --host 0.0.0.0 --port 3001
 
 Expose `/mcp` through your HTTPS reverse proxy or platform route, and use `/healthz` for uptime checks. The Node server listens over HTTP internally; TLS should terminate at the deployment platform, load balancer, or reverse proxy.
 
+For OKX.AI listing, protect `/mcp` with the **OKX Agent Payments Protocol** seller gate. Set `AGENTPAY_A2MCP_PAYMENT_ENABLED=true`, `AGENTPAY_A2MCP_PAYMENT_PAY_TO`, `AGENTPAY_A2MCP_PAYMENT_PRICE`, and OKX facilitator credentials (`OKX_APP_API_KEY`, `OKX_APP_SECRET_KEY`, `OKX_APP_PASSPHRASE`) or `AGENTPAY_A2MCP_PAYMENT_FACILITATOR_URL`. Unpaid MCP calls then return HTTP `402` with `PAYMENT-REQUIRED`; paid calls are verified, settled, and returned with `PAYMENT-RESPONSE`. `/healthz` remains free.
+
 ## Repository Layout
 
 - `apps/mcp-server/` - AgentPay MCP tools, runtime wiring, Supabase, Ethers, and LI.FI adapters.
@@ -118,6 +120,8 @@ The generated config and server environment use these core values:
 Optional values include `SETUP_WEB_URL`, `LIFI_API_KEY`, `AGENTPAY_OWNER_ADDRESS`, `AGENTPAY_EXECUTOR_ADDRESS`, `AGENTPAY_HOME_CHAIN_ID`, X Layer token overrides, `AGENTPAY_INITIAL_ROUTE_TARGETS`, and `SETUP_WEB_PORT`.
 
 Use `X402_BAZAAR_FACILITATOR_URL` to override the default x402 Bazaar facilitator.
+
+Use `AGENTPAY_A2MCP_PAYMENT_*` and `OKX_APP_*` only for the public A2MCP seller endpoint. Keep these values server-side; they are not needed for local stdio MCP installs.
 
 Keep private keys and Supabase service-role keys server-side. Never paste secrets into chat.
 

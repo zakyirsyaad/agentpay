@@ -91,6 +91,8 @@ describe("publishable AgentPay package manifests", () => {
         zod: rootManifest.dependencies.zod,
       },
       "@agentpay-ai/mcp-server": {
+        "@okxweb3/x402-core": rootManifest.dependencies["@okxweb3/x402-core"],
+        "@okxweb3/x402-evm": rootManifest.dependencies["@okxweb3/x402-evm"],
         "@supabase/supabase-js": rootManifest.dependencies["@supabase/supabase-js"],
         ethers: rootManifest.dependencies.ethers,
       },
@@ -151,6 +153,8 @@ describe("publishable AgentPay package manifests", () => {
     const manifest = await readPackageJson("apps/mcp-server");
 
     assert.ok(manifest.files.includes("src/mcp/http.ts"));
+    assert.ok(manifest.files.includes("src/mcp/okx-agent-payment.ts"));
     await access("apps/mcp-server/src/mcp/http.ts");
+    await access("apps/mcp-server/src/mcp/okx-agent-payment.ts");
   });
 });

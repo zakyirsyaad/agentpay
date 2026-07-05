@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { PaymentPayload, PaymentRequirements } from "@okxweb3/x402-core/types";
 import { describe, it } from "node:test";
 
 import type { AgentPayRuntime } from "../runtime/agentpay-runtime.ts";
+import type { AgentPayMcpPaymentProcessor } from "./okx-agent-payment.ts";
 import { startAgentPayHttpServer } from "./http.ts";
+import type { ConnectableAgentPayMcpServer } from "./stdio.ts";
 
 describe("startAgentPayHttpServer", () => {
   it("serves health checks and MCP tools over Streamable HTTP", async () => {
@@ -63,6 +66,171 @@ describe("startAgentPayHttpServer", () => {
         },
         id: null,
       });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps health checks free when MCP payments are enabled", async () => {
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        throw new Error("health checks should not touch the payment processor.");
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.healthUrl);
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        ok: true,
+        service: "agentpay-a2mcp",
+        transport: "streamable-http",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("returns an OKX Agent Payments Protocol challenge before serving MCP", async () => {
+    let mcpServerWasCreated = false;
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest(context) {
+        assert.equal(context.method, "POST");
+        assert.equal(context.path, "/mcp");
+        assert.equal(context.paymentHeader, undefined);
+
+        return {
+          type: "payment-error",
+          response: {
+            status: 402,
+            headers: {
+              "content-type": "application/json",
+              "PAYMENT-REQUIRED": Buffer.from(
+                JSON.stringify({
+                  x402Version: 2,
+                  resource: {
+                    url: "/mcp",
+                    description: "AgentPay public MCP endpoint",
+                  },
+                  accepts: [
+                    {
+                      scheme: "exact",
+                      network: "eip155:196",
+                      asset: "0x0000000000000000000000000000000000000001",
+                      amount: "10000",
+                      payTo: "0x0000000000000000000000000000000000000002",
+                      maxTimeoutSeconds: 300,
+                      extra: {},
+                    },
+                  ],
+                }),
+              ).toString("base64"),
+            },
+            body: {
+              error: "Payment required.",
+            },
+          },
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime();
+      },
+      createServer(runtime) {
+        mcpServerWasCreated = true;
+        return createFakeMcpServer(runtime);
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+
+      assert.equal(response.status, 402);
+      assert.equal((response.headers.get("PAYMENT-REQUIRED") ?? "").length > 0, true);
+      assert.deepEqual(await response.json(), { error: "Payment required." });
+      assert.equal(mcpServerWasCreated, false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("forwards paid MCP requests and settles after the MCP response", async () => {
+    const calls: string[] = [];
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest(context) {
+        calls.push(`process:${context.paymentHeader}`);
+
+        return {
+          type: "payment-verified",
+          paymentPayload: createPaymentPayload(),
+          paymentRequirements: createPaymentRequirements(),
+        };
+      },
+      async processSettlement(_payload, _requirements, _extensions, transportContext) {
+        calls.push(`settle:${transportContext?.responseBody?.byteLength ?? 0}`);
+
+        return {
+          success: true,
+          status: "success",
+          transaction: "0xsettled",
+          network: "eip155:196",
+          headers: {
+            "PAYMENT-RESPONSE": Buffer.from(JSON.stringify({ success: true, transaction: "0xsettled" })).toString(
+              "base64",
+            ),
+          },
+          requirements: createPaymentRequirements(),
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "PAYMENT-SIGNATURE": "paid",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      const responseText = await response.text();
+
+      assert.equal(response.status, 200);
+      assert.equal((response.headers.get("PAYMENT-RESPONSE") ?? "").length > 0, true);
+      assert.match(responseText, /prepare_wallet_creation/);
+      assert.equal(calls[0], "process:paid");
+      assert.match(calls[1] ?? "", /^settle:\d+$/);
     } finally {
       await server.close();
     }
@@ -138,4 +306,52 @@ function createRuntime(): AgentPayRuntime {
       throw new Error("listPaymentEvents was not expected.");
     },
   };
+}
+
+function createPaymentProcessor(overrides: Partial<AgentPayMcpPaymentProcessor>) {
+  return {
+    async processHTTPRequest() {
+      return {
+        type: "no-payment-required",
+      } as const;
+    },
+    async processSettlement() {
+      return {
+        success: true,
+        transaction: "0x0",
+        network: "eip155:196",
+        headers: {},
+        requirements: createPaymentRequirements(),
+      };
+    },
+    ...overrides,
+  } satisfies AgentPayMcpPaymentProcessor;
+}
+
+function createPaymentRequirements(): PaymentRequirements {
+  return {
+    scheme: "exact",
+    network: "eip155:196",
+    asset: "0x0000000000000000000000000000000000000001",
+    amount: "1",
+    payTo: "0x0000000000000000000000000000000000000002",
+    maxTimeoutSeconds: 300,
+    extra: {},
+  };
+}
+
+function createPaymentPayload(): PaymentPayload {
+  return {
+    x402Version: 2,
+    accepted: createPaymentRequirements(),
+    payload: {},
+  };
+}
+
+function createFakeMcpServer(_runtime: AgentPayRuntime): ConnectableAgentPayMcpServer {
+  return {
+    registerTool() {},
+    async connect() {},
+    async close() {},
+  } as unknown as ConnectableAgentPayMcpServer;
 }

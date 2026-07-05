@@ -22,6 +22,9 @@ describe("README", () => {
     assert.match(contents, /packages\/cli/);
     assert.match(contents, /agentpay serve-http/);
     assert.match(contents, /public HTTPS A2MCP|public MCP endpoint/i);
+    assert.match(contents, /OKX Agent Payments Protocol/);
+    assert.match(contents, /AGENTPAY_A2MCP_PAYMENT_ENABLED/);
+    assert.match(contents, /PAYMENT-REQUIRED/);
     assert.doesNotMatch(contents, /docs\//);
     assert.doesNotMatch(contents, /AGENTPAY_CONCEPT/);
     assert.doesNotMatch(contents, /product blueprint/i);
@@ -40,6 +43,8 @@ describe("README", () => {
     assert.match(contents, /network: "mainnet" \| "testnet"/);
     assert.match(contents, /pay 5 USDT/i);
     assert.match(contents, /agentpay serve-http/);
+    assert.match(contents, /OKX Agent Payments Protocol/);
+    assert.match(contents, /AGENTPAY_A2MCP_PAYMENT_ENABLED/);
     assert.doesNotMatch(quickStart, /agentpay doctor/i);
     assert.doesNotMatch(quickStart, /agentpay setup-web/i);
   });

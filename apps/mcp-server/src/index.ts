@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 export * from "./mcp/agentpay-mcp.ts";
 export * from "./mcp/http.ts";
+export * from "./mcp/okx-agent-payment.ts";
 export * from "./mcp/stdio.ts";
 export * from "./runtime/agentpay-runtime.ts";
 export * from "./services/lifi.ts";

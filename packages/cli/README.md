@@ -44,7 +44,7 @@ For x402 paid APIs, the agent uses `search_x402_services` when you do not provid
 - `agentpay doctor` is a diagnostic check for required config without printing secrets.
 - `agentpay setup-web` is a fallback way to serve the setup/signing web server when the agent cannot start it for you.
 
-For OKX.AI A2MCP listing, run `agentpay serve-http` behind your HTTPS domain or reverse proxy and register the public `/mcp` URL. The built-in `/healthz` route returns readiness metadata for platform health checks.
+For OKX.AI A2MCP listing, run `agentpay serve-http` behind your HTTPS domain or reverse proxy and register the public `/mcp` URL. Enable the **OKX Agent Payments Protocol** seller gate with `AGENTPAY_A2MCP_PAYMENT_ENABLED=true`, pay-to, price, network, and facilitator credentials. The built-in `/healthz` route remains free for platform health checks.
 
 ## Required Configuration
 
@@ -57,7 +57,7 @@ Fill the generated config or provide equivalent environment variables:
 - `EXECUTOR_PRIVATE_KEY`
 - `SETUP_DEPLOYER_PRIVATE_KEY` for setup web
 
-Optional values include `SETUP_WEB_URL`, `LIFI_API_KEY`, `X402_BAZAAR_FACILITATOR_URL`, `AGENTPAY_ACCOUNT_BYTECODE_PATH`, `AGENTPAY_INITIAL_ROUTE_TARGETS`, and X Layer token overrides.
+Optional values include `SETUP_WEB_URL`, `LIFI_API_KEY`, `X402_BAZAAR_FACILITATOR_URL`, `AGENTPAY_ACCOUNT_BYTECODE_PATH`, `AGENTPAY_INITIAL_ROUTE_TARGETS`, X Layer token overrides, and `AGENTPAY_A2MCP_PAYMENT_*` values for public OKX.AI A2MCP seller payments.
 
 ## Safety Model
 
