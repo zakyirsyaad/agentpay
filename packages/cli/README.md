@@ -16,7 +16,7 @@ Use `--runtime codex|claude|cursor|generic|hermes` to choose a runtime explicitl
 npx @agentpay-ai/agentpay install --runtime codex
 ```
 
-The installer writes MCP runtime files and `skills/agentpay/SKILL.md`. The generated MCP config points to `https://mcp.agentpay.site/mcp`.
+The installer writes MCP runtime files and `skills/agentpay/SKILL.md`. The generated MCP config points to `https://mcp.agentpay.site/mcp`. For Claude, Cursor, and Hermes, the installer also registers `agentpay` in the runtime's native MCP config, so the agent can discover AgentPay tools instead of falling back to web search or raw RPC calls.
 
 After install, reload or reconnect your agent runtime if needed, then return to your agent chat. From there, ask naturally:
 

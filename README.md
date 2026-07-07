@@ -12,7 +12,7 @@ Install AgentPay into a Codex, Claude, Cursor, Hermes, or generic MCP runtime:
 npx @agentpay-ai/agentpay install
 ```
 
-The installer detects the target runtime when possible, accepts `--runtime codex|claude|cursor|generic|hermes`, installs runtime MCP config, and copies `skills/agentpay/SKILL.md`. By default the MCP config points to the hosted endpoint `https://mcp.agentpay.site/mcp`, so normal users do not need Supabase, RPC, executor, deployer, or bytecode config.
+The installer detects the target runtime when possible, accepts `--runtime codex|claude|cursor|generic|hermes`, installs runtime MCP config, and copies `skills/agentpay/SKILL.md`. By default the MCP config points to the hosted endpoint `https://mcp.agentpay.site/mcp`, so normal users do not need Supabase, RPC, executor, deployer, or bytecode config. Claude, Cursor, and Hermes installs also upsert `agentpay` into their native MCP config files so those runtimes can discover AgentPay tools directly.
 
 Reload or reconnect the agent runtime if needed. After that, return to chat and ask naturally:
 

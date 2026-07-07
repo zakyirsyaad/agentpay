@@ -166,6 +166,7 @@ describe("installAgentPay", () => {
           runtime,
           outputDir: join(outputDir, runtime),
           packageRoot: process.cwd(),
+          installNativeRuntimeConfig: false,
         });
 
         const instructions = await readFile(
@@ -197,6 +198,132 @@ describe("installAgentPay", () => {
       }
     } finally {
       await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("registers hosted AgentPay MCP in native Hermes config", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "agentpay-cli-hermes-"));
+    const outputDir = join(tempDir, "install");
+    const hermesConfigPath = join(tempDir, ".hermes", "config.yaml");
+
+    try {
+      await mkdir(dirname(hermesConfigPath), { recursive: true });
+      await writeFile(
+        hermesConfigPath,
+        [
+          "_config_version: 9",
+          "mcp_servers:",
+          "  roblox_studio:",
+          '    command: "roblox-studio-mcp"',
+          "    enabled: true",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const result = await installAgentPay({
+        runtime: "hermes",
+        outputDir,
+        packageRoot: process.cwd(),
+        hermesConfigPath,
+      });
+
+      const config = await readFile(hermesConfigPath, "utf8");
+
+      assert.match(config, /mcp_servers:/);
+      assert.match(config, /roblox_studio:/);
+      assert.match(config, /agentpay:/);
+      assert.match(config, /url: "https:\/\/mcp\.agentpay\.site\/mcp"/);
+      assert.match(config, /enabled: true/);
+      assert.ok(result.writtenFiles.includes(hermesConfigPath));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("registers hosted AgentPay MCP in native Claude Desktop config", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "agentpay-cli-claude-"));
+    const outputDir = join(tempDir, "install");
+    const claudeDesktopConfigPath = join(tempDir, "Claude", "claude_desktop_config.json");
+
+    try {
+      await mkdir(dirname(claudeDesktopConfigPath), { recursive: true });
+      await writeFile(
+        claudeDesktopConfigPath,
+        `${JSON.stringify(
+          {
+            preferences: {
+              theme: "dark",
+            },
+            mcpServers: {
+              existing: {
+                url: "https://example.com/mcp",
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      const result = await installAgentPay({
+        runtime: "claude",
+        outputDir,
+        packageRoot: process.cwd(),
+        claudeDesktopConfigPath,
+      });
+      const config = JSON.parse(await readFile(claudeDesktopConfigPath, "utf8"));
+
+      assert.deepEqual(config.preferences, { theme: "dark" });
+      assert.deepEqual(config.mcpServers.existing, { url: "https://example.com/mcp" });
+      assert.deepEqual(config.mcpServers.agentpay, { url: "https://mcp.agentpay.site/mcp" });
+      assert.ok(result.writtenFiles.includes(claudeDesktopConfigPath));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("registers hosted AgentPay MCP in native Cursor config", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "agentpay-cli-cursor-"));
+    const outputDir = join(tempDir, "install");
+    const cursorMcpConfigPath = join(tempDir, ".cursor", "mcp.json");
+
+    try {
+      await mkdir(dirname(cursorMcpConfigPath), { recursive: true });
+      await writeFile(
+        cursorMcpConfigPath,
+        `${JSON.stringify(
+          {
+            mcpServers: {
+              filesystem: {
+                command: "npx",
+                args: ["-y", "@modelcontextprotocol/server-filesystem"],
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      const result = await installAgentPay({
+        runtime: "cursor",
+        outputDir,
+        packageRoot: process.cwd(),
+        cursorMcpConfigPath,
+      });
+      const config = JSON.parse(await readFile(cursorMcpConfigPath, "utf8"));
+
+      assert.deepEqual(config.mcpServers.filesystem, {
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem"],
+      });
+      assert.deepEqual(config.mcpServers.agentpay, { url: "https://mcp.agentpay.site/mcp" });
+      assert.ok(result.writtenFiles.includes(cursorMcpConfigPath));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 

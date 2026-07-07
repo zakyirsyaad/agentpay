@@ -92,6 +92,10 @@ export interface InstallAgentPayOptions {
   force?: boolean;
   selfHosted?: boolean;
   mcpUrl?: string;
+  installNativeRuntimeConfig?: boolean;
+  claudeDesktopConfigPath?: string;
+  cursorMcpConfigPath?: string;
+  hermesConfigPath?: string;
 }
 
 export interface InstallAgentPayResult {
@@ -297,6 +301,20 @@ export async function installAgentPay(options: InstallAgentPayOptions): Promise<
       return file.to;
     }),
   );
+
+  if (options.installNativeRuntimeConfig !== false) {
+    const mcpConfig = createAgentPayMcpConfig({
+      selfHosted,
+      mcpUrl: options.mcpUrl ?? DEFAULT_HOSTED_MCP_URL,
+    });
+    const mcpServers = mcpConfig.mcpServers as { agentpay: Record<string, unknown> };
+    const nativeConfigPath = getNativeRuntimeConfigPath(options);
+
+    if (nativeConfigPath) {
+      await upsertNativeRuntimeAgentPayMcpServer(options.runtime, nativeConfigPath, mcpServers.agentpay);
+      writtenFiles.push(nativeConfigPath);
+    }
+  }
 
   return {
     outputDir: options.outputDir,
@@ -572,6 +590,199 @@ function createAgentPayMcpConfig(options: { selfHosted: boolean; mcpUrl: string 
           },
     },
   };
+}
+
+function getNativeRuntimeConfigPath(options: InstallAgentPayOptions): string | undefined {
+  if (options.runtime === "claude") {
+    return options.claudeDesktopConfigPath ?? getClaudeDesktopConfigPath();
+  }
+
+  if (options.runtime === "cursor") {
+    return options.cursorMcpConfigPath ?? join(homedir(), ".cursor", "mcp.json");
+  }
+
+  if (options.runtime === "hermes") {
+    return options.hermesConfigPath ?? join(homedir(), ".hermes", "config.yaml");
+  }
+
+  return undefined;
+}
+
+function getClaudeDesktopConfigPath(): string {
+  if (process.platform === "win32") {
+    return join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
+  }
+
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  }
+
+  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "Claude", "claude_desktop_config.json");
+}
+
+async function upsertNativeRuntimeAgentPayMcpServer(
+  runtime: AgentPayRuntimeName,
+  configPath: string,
+  serverConfig: Record<string, unknown>,
+): Promise<void> {
+  if (runtime === "hermes") {
+    await upsertHermesAgentPayMcpServer(configPath, serverConfig);
+    return;
+  }
+
+  await upsertJsonAgentPayMcpServer(configPath, serverConfig);
+}
+
+async function upsertJsonAgentPayMcpServer(configPath: string, serverConfig: Record<string, unknown>): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+
+  let config: Record<string, unknown> = {};
+  try {
+    const rawConfig = await readFile(configPath, "utf8");
+    config = rawConfig.trim() ? (JSON.parse(rawConfig) as Record<string, unknown>) : {};
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: string }).code : undefined;
+    if (code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const existingMcpServers =
+    typeof config.mcpServers === "object" && config.mcpServers !== null && !Array.isArray(config.mcpServers)
+      ? (config.mcpServers as Record<string, unknown>)
+      : {};
+  const nextConfig = {
+    ...config,
+    mcpServers: {
+      ...existingMcpServers,
+      agentpay: serverConfig,
+    },
+  };
+
+  await writeFile(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
+}
+
+async function upsertHermesAgentPayMcpServer(
+  configPath: string,
+  serverConfig: Record<string, unknown>,
+): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+
+  let contents = "";
+  try {
+    contents = await readFile(configPath, "utf8");
+  } catch {
+    // Hermes creates this file during setup, but a fresh machine can be empty.
+  }
+
+  const nextContents = upsertYamlMapEntry(
+    contents,
+    "mcp_servers",
+    "agentpay",
+    formatHermesAgentPayMcpServer(serverConfig),
+  );
+
+  await writeFile(configPath, nextContents, "utf8");
+}
+
+function formatHermesAgentPayMcpServer(serverConfig: Record<string, unknown>): string[] {
+  const lines = ["  agentpay:"];
+
+  if (typeof serverConfig.url === "string") {
+    lines.push(`    url: ${quoteYamlString(serverConfig.url)}`);
+  }
+
+  if (typeof serverConfig.command === "string") {
+    lines.push(`    command: ${quoteYamlString(serverConfig.command)}`);
+  }
+
+  const args = Array.isArray(serverConfig.args) ? serverConfig.args.filter((arg): arg is string => typeof arg === "string") : [];
+  if (args.length > 0) {
+    lines.push("    args:");
+    lines.push(...args.map((arg) => `      - ${quoteYamlString(arg)}`));
+  }
+
+  const env = isStringRecord(serverConfig.env) ? serverConfig.env : undefined;
+  if (env) {
+    lines.push("    env:");
+    lines.push(...Object.entries(env).map(([key, value]) => `      ${key}: ${quoteYamlString(value)}`));
+  }
+
+  lines.push("    enabled: true");
+
+  return lines;
+}
+
+function upsertYamlMapEntry(contents: string, mapKey: string, entryKey: string, entryLines: string[]): string {
+  const normalized = contents.trimEnd();
+
+  if (!normalized) {
+    return `${mapKey}:\n${entryLines.join("\n")}\n`;
+  }
+
+  const lines = normalized.split(/\r?\n/);
+  const mapPattern = new RegExp(`^${escapeRegExp(mapKey)}:\\s*(?:\\{\\}|null)?\\s*(?:#.*)?$`);
+  const mapStart = lines.findIndex((line) => mapPattern.test(line));
+
+  if (mapStart < 0) {
+    return `${normalized}\n\n${mapKey}:\n${entryLines.join("\n")}\n`;
+  }
+
+  const mapEnd = findNextTopLevelLine(lines, mapStart + 1);
+  const absoluteMapEnd = mapEnd < 0 ? lines.length : mapEnd;
+  const block = lines.slice(mapStart + 1, absoluteMapEnd);
+  const entryPattern = new RegExp(`^  ${escapeRegExp(entryKey)}:\\s*(?:#.*)?$`);
+  const entryStart = block.findIndex((line) => entryPattern.test(line));
+
+  if (entryStart < 0) {
+    const updated = [...lines.slice(0, absoluteMapEnd), ...entryLines, ...lines.slice(absoluteMapEnd)];
+    return `${updated.join("\n")}\n`;
+  }
+
+  const entryEnd = findNextSecondLevelLine(block, entryStart + 1);
+  const absoluteEntryStart = mapStart + 1 + entryStart;
+  const absoluteEntryEnd = mapStart + 1 + (entryEnd < 0 ? block.length : entryEnd);
+  const updated = [...lines.slice(0, absoluteEntryStart), ...entryLines, ...lines.slice(absoluteEntryEnd)];
+
+  return `${updated.join("\n")}\n`;
+}
+
+function findNextTopLevelLine(lines: string[], start: number): number {
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() && !line.startsWith(" ") && !line.startsWith("\t")) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function findNextSecondLevelLine(lines: string[], start: number): number {
+  for (let index = start; index < lines.length; index += 1) {
+    if (/^  \S/.test(lines[index])) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function quoteYamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((item) => typeof item === "string")
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function assertWritable(path: string, force: boolean): Promise<void> {
