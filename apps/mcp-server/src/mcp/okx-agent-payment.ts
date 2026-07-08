@@ -132,30 +132,32 @@ export async function createOkxAgentPaymentProcessor(
   const resourceServer = new x402ResourceServer(createFacilitatorClient(config));
   resourceServer.register(config.network, new ExactEvmScheme());
 
-  const paymentServer = new x402HTTPResourceServer(resourceServer, {
-    [`POST ${options.mcpPath}`]: {
-      accepts: createPaymentOption(config),
-      description: "AgentPay public MCP endpoint",
-      mimeType: "application/json",
-      unpaidResponseBody() {
-        return {
-          contentType: "application/json",
-          body: {
-            error: "Payment required.",
-            protocol: "OKX Agent Payments Protocol",
-          },
-        };
-      },
-      settlementFailedResponseBody() {
-        return {
-          contentType: "application/json",
-          body: {
-            error: "Payment settlement failed.",
-            protocol: "OKX Agent Payments Protocol",
-          },
-        };
-      },
+  const resourceConfig = {
+    accepts: createPaymentOption(config),
+    description: "AgentPay public MCP endpoint",
+    mimeType: "application/json",
+    unpaidResponseBody() {
+      return {
+        contentType: "application/json",
+        body: {
+          error: "Payment required.",
+          protocol: "OKX Agent Payments Protocol",
+        },
+      };
     },
+    settlementFailedResponseBody() {
+      return {
+        contentType: "application/json",
+        body: {
+          error: "Payment settlement failed.",
+          protocol: "OKX Agent Payments Protocol",
+        },
+      };
+    },
+  };
+  const paymentServer = new x402HTTPResourceServer(resourceServer, {
+    [`GET ${options.mcpPath}`]: resourceConfig,
+    [`POST ${options.mcpPath}`]: resourceConfig,
   });
 
   await paymentServer.initialize();

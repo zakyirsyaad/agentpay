@@ -1,6 +1,6 @@
 {
   "name": "@agentpay-ai/mcp-server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
