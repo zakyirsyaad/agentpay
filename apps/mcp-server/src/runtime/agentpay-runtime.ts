@@ -117,6 +117,7 @@ const REQUIRED_PRODUCTION_ENV_NAMES = [
   "EXECUTOR_PRIVATE_KEY",
   "AGENTPAY_SESSION_HASH_KEY",
   "AGENTPAY_REVIEW_TOKEN_SECRET",
+  "SETUP_WEB_URL",
 ];
 const PRODUCTION_FORBIDDEN_ENV_NAMES = [
   "XLAYER_RPC_URL",
@@ -285,6 +286,9 @@ export function parseAgentPayEnv(env: NodeJS.ProcessEnv | Record<string, string 
       ? "X402_BAZAAR_FACILITATOR_URL"
       : undefined,
     normalized.SETUP_WEB_URL && !isSecureReviewUrl(normalized.SETUP_WEB_URL) ? "SETUP_WEB_URL" : undefined,
+    isProduction && normalized.SETUP_WEB_URL && isLoopbackReviewUrl(normalized.SETUP_WEB_URL)
+      ? "SETUP_WEB_URL"
+      : undefined,
     normalized.AGENTPAY_HOME_CHAIN_ID && !homeChainId ? "AGENTPAY_HOME_CHAIN_ID" : undefined,
     normalized.AGENTPAY_HTTP_MODE && !runtimeHttpModes.has(normalized.AGENTPAY_HTTP_MODE) ? "AGENTPAY_HTTP_MODE" : undefined,
     normalized.AGENTPAY_ENVIRONMENT && !runtimeEnvironments.has(normalized.AGENTPAY_ENVIRONMENT as SessionEnvironment)
@@ -569,6 +573,14 @@ function isSecureReviewUrl(value: string): boolean {
       return true;
     }
     return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackReviewUrl(value: string): boolean {
+  try {
+    return isLoopbackHostname(new URL(value).hostname);
   } catch {
     return false;
   }

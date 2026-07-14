@@ -56,6 +56,7 @@ describe("startAgentPayMcpServer", () => {
             EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
             AGENTPAY_SESSION_HASH_KEY: "session-hash-key-012345678901234567890123",
             AGENTPAY_REVIEW_TOKEN_SECRET: "review-token-secret-012345678901234567890123",
+            SETUP_WEB_URL: "https://setup.agentpay.site/review",
           },
         }),
       /readiness-gated HTTP surface/i,

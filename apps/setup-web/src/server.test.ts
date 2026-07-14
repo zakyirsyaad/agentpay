@@ -3,7 +3,13 @@ import { describe, it } from "node:test";
 
 import type { SetupIntentRecord } from "@agentpay-ai/shared";
 
-import { createSetupWebHandler, renderSetupPage, startSetupWebServer } from "./server.ts";
+import {
+  createReviewOnlyWebHandler,
+  createSetupWebHandler,
+  renderSetupPage,
+  startReviewOnlyWebServer,
+  startSetupWebServer,
+} from "./server.ts";
 
 const setupIntent: SetupIntentRecord = {
   id: "setup_123",
@@ -105,6 +111,22 @@ describe("createSetupWebHandler", () => {
   });
 });
 
+describe("createReviewOnlyWebHandler", () => {
+  it("serves only Review & Sign routes and refuses wallet setup routes", async () => {
+    const handler = createReviewOnlyWebHandler(createDependencies());
+
+    const review = await handler(new Request("https://review.agentpay.site/review"));
+    assert.equal(review.status, 200);
+    assert.match(await review.text(), /Review &amp; Sign/);
+
+    const setup = await handler(new Request("https://review.agentpay.site/setup"));
+    assert.equal(setup.status, 404);
+
+    const setupApi = await handler(new Request("https://review.agentpay.site/api/setup-intents/setup_123"));
+    assert.equal(setupApi.status, 404);
+  });
+});
+
 describe("startSetupWebServer", () => {
   it("returns the actual ephemeral port selected by the operating system", async () => {
     const server = await startSetupWebServer(createDependencies(), { port: 0 });
@@ -173,6 +195,27 @@ describe("startSetupWebServer", () => {
   });
 });
 
+describe("startReviewOnlyWebServer", () => {
+  it("serves Review & Sign while keeping setup routes unavailable", async () => {
+    const server = await startReviewOnlyWebServer(createDependencies(), { port: 0 });
+
+    try {
+      assert.equal(new URL(server.url).pathname, "/review");
+      assert.equal((await fetch(new URL("/review", server.url))).status, 200);
+      assert.equal((await fetch(new URL("/setup", server.url))).status, 404);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects a missing dedicated review secret before binding a port", async () => {
+    await assert.rejects(
+      () => startReviewOnlyWebServer(createDependencies({ reviewTokenSecret: undefined }), { port: 0 }),
+      /dedicated review token secret/,
+    );
+  });
+});
+
 function createDependencies(overrides: Partial<Parameters<typeof createSetupWebHandler>[0]> & { setupIntent?: SetupIntentRecord | null } = {}) {
   const { setupIntent: intentOverride, ...rest } = overrides;
 
@@ -190,6 +233,7 @@ function createDependencies(overrides: Partial<Parameters<typeof createSetupWebH
       };
     },
     clock: () => new Date("2026-07-03T04:00:00.000Z"),
+    reviewTokenSecret: "review-secret-for-server-tests-012345678901234567",
     ...rest,
   };
 }

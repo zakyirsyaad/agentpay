@@ -56,6 +56,30 @@ export function createSetupWebHandler(dependencies: SetupWebDependencies) {
   };
 }
 
+/**
+ * Creates the production-safe Review & Sign surface without exposing wallet
+ * setup or deployment routes. The deployment operator can host this handler
+ * separately while the setup UI remains disabled in production.
+ */
+export function createReviewOnlyWebHandler(dependencies: PaymentReviewWebDependencies) {
+  assertReviewOnlyDependencies(dependencies);
+  const paymentReviewHandler = createPaymentReviewHandler(dependencies);
+
+  return async (request: Request): Promise<Response> => {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/review" && request.method === "GET") {
+      return createPaymentReviewPageResponse();
+    }
+
+    if (url.pathname === "/api/payment-review") {
+      return paymentReviewHandler(request);
+    }
+
+    return jsonResponse({ error: "Not found." }, 404);
+  };
+}
+
 export function renderSetupPage(): string {
   return `<!doctype html>
 <html lang="en">
@@ -155,7 +179,21 @@ export async function startSetupWebServer(
   dependencies: SetupWebDependencies,
   options: { port?: number; hostname?: string } = {},
 ): Promise<{ close(): Promise<void>; url: string }> {
-  const handler = createSetupWebHandler(dependencies);
+  return startWebServer(createSetupWebHandler(dependencies), options);
+}
+
+export async function startReviewOnlyWebServer(
+  dependencies: PaymentReviewWebDependencies,
+  options: { port?: number; hostname?: string } = {},
+): Promise<{ close(): Promise<void>; url: string }> {
+  return startWebServer(createReviewOnlyWebHandler(dependencies), options, "/review");
+}
+
+async function startWebServer(
+  handler: (request: Request) => Promise<Response>,
+  options: { port?: number; hostname?: string },
+  urlPath: "/setup" | "/review" = "/setup",
+): Promise<{ close(): Promise<void>; url: string }> {
   const server = createServer(async (request, response) => {
     try {
       const origin = `http://${request.headers.host ?? "localhost"}`;
@@ -197,12 +235,18 @@ export async function startSetupWebServer(
   }
 
   return {
-    url: `http://${hostname}:${address.port}/setup`,
+    url: `http://${hostname}:${address.port}${urlPath}`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       }),
   };
+}
+
+function assertReviewOnlyDependencies(dependencies: PaymentReviewWebDependencies): void {
+  if (!dependencies.reviewTokenSecret || dependencies.reviewTokenSecret.length < 32) {
+    throw new Error("Review-only web server requires a dedicated review token secret.");
+  }
 }
 
 function resolveReviewClientId(request: IncomingMessage): string {

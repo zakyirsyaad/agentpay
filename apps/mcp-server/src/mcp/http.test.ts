@@ -1237,6 +1237,7 @@ function productionMcpEnv(): Record<string, string> {
     SETUP_DEPLOYER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
     AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
     AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
+    SETUP_WEB_URL: "https://setup.agentpay.site/review",
   };
 }
 

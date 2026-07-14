@@ -124,6 +124,7 @@ describe("parseAgentPayEnv", () => {
       EXECUTOR_PRIVATE_KEY: validPrivateKey,
       AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
       AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
+      SETUP_WEB_URL: "https://setup.agentpay.site/review",
     });
 
     assert.equal(config.supabaseUrl, "https://production-project.supabase.co");
@@ -131,6 +132,22 @@ describe("parseAgentPayEnv", () => {
     assert.equal(config.xlayerRpcUrl, "https://rpc.xlayer.tech/terigon");
     assert.equal(config.homeChainId, 196);
     assert.equal(config.environment, "production");
+
+    assert.throws(
+      () => parseAgentPayEnv({
+        AGENTPAY_ENVIRONMENT: "production",
+        AGENTPAY_HOME_CHAIN_ID: "196",
+        AGENTPAY_ACCOUNT_VERSION: "v2",
+        SUPABASE_PRODUCTION_URL: "https://production-project.supabase.co",
+        SUPABASE_PRODUCTION_SERVICE_ROLE_KEY: "production-service-key",
+        XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech/terigon",
+        EXECUTOR_PRIVATE_KEY: validPrivateKey,
+        AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
+        AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
+        SETUP_WEB_URL: "http://localhost:3000/review",
+      }),
+      /SETUP_WEB_URL/,
+    );
 
     assert.throws(
       () => parseAgentPayEnv({

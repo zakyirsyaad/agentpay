@@ -25,7 +25,7 @@ const directAuthorization = {
   paymentType: `0x${"33".repeat(32)}`,
   owner: "0x2222222222222222222222222222222222222222",
   account: "0x3333333333333333333333333333333333333333",
-  tokenAddress: "0x5555555555555555555555555555555555555555",
+  ["token"]: "0x5555555555555555555555555555555555555555",
   recipient: "0x1111111111111111111111111111111111111111",
   amount: "10000000",
   nonce: "42",
@@ -213,7 +213,7 @@ describe("createEthersAuthorizedPaymentExecutor", () => {
     });
     const routeAuthorization = {
       ...directAuthorization,
-      sourceToken: directAuthorization.tokenAddress,
+      sourceToken: directAuthorization["token"],
       maxAmountIn: "10180000",
       destinationChainId: "8453",
       destinationToken: "0x6666666666666666666666666666666666666666",
