@@ -459,7 +459,9 @@ function renderPaymentReviewPage(nonce: string): string {
         const summary = document.getElementById("summary");
         const typedData = document.getElementById("typed-data");
         const sign = document.getElementById("sign");
-        const ethereum = window.ethereum;
+        const ethereum = [window.okxwallet, window.ethereum].find(
+          (candidate) => candidate && typeof candidate.request === "function",
+        );
 
         history.replaceState(null, document.title, window.location.pathname);
 
