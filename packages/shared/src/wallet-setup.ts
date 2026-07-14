@@ -52,6 +52,7 @@ export type CompleteWalletSetupInput = z.infer<typeof completeWalletSetupInputSc
 
 export interface SetupIntentRecord {
   id: string;
+  tenantId?: string;
   ownerAddress?: string;
   executorAddress: string;
   messageToSign: string;

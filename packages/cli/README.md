@@ -1,8 +1,8 @@
 # AgentPay
 
-Chat-approved stablecoin payments for AI agents.
+Owner-authorized stablecoin payments for AI agents.
 
-AgentPay installs MCP tools and runtime instructions for chat-approved X Layer payments. By default it connects users to the hosted AgentPay MCP endpoint, so normal users do not manage Supabase, RPC, executor, deployer, or bytecode config.
+AgentPay installs MCP tools and runtime instructions for owner-authorized X Layer payments. By default it connects users to the hosted AgentPay MCP endpoint, so normal users do not manage Supabase, RPC, executor, deployer, or bytecode config.
 
 ## Quick Start
 
@@ -16,7 +16,7 @@ Use `--runtime codex|claude|cursor|generic|hermes` to choose a runtime explicitl
 npx @agentpay-ai/agentpay install --runtime codex
 ```
 
-The installer writes MCP runtime files and `skills/agentpay/SKILL.md`. The generated MCP config points to `https://mcp.agentpay.site/mcp`. For Claude, Cursor, and Hermes, the installer also registers `agentpay` in the runtime's native MCP config, so the agent can discover AgentPay tools instead of falling back to web search or raw RPC calls.
+The installer writes MCP runtime files and `skills/agentpay/SKILL.md`. The generated MCP config points to the authenticated consumer endpoint `https://wallet.agentpay.site/mcp`. For Claude, Cursor, and Hermes, the installer also registers `agentpay` in the runtime's native MCP config, so the agent can discover AgentPay tools instead of falling back to web search or raw RPC calls. The separate paid public execution ASP is `https://mcp.agentpay.site/mcp` and is used only after Review & Sign.
 
 After install, reload or reconnect your agent runtime if needed, then return to your agent chat. From there, ask naturally:
 
@@ -34,9 +34,9 @@ AgentPay supports X Layer mainnet and testnet. If you do not name one, the agent
 
 Cross-chain routes are selected during quote or payment preparation, not during wallet setup. Create an X Layer mainnet or X Layer testnet AgentPay wallet first, then decide whether a specific payment stays on that network or uses a cross-chain route.
 
-The agent should use AgentPay tools in chat to create the wallet setup link, check wallet creation, prepare payments, request the exact approval phrase, execute after exact approval, and track status.
+The agent should use AgentPay tools in chat to create the wallet setup link, check wallet creation, prepare payments, show the canonical EIP-712 authorization, send the owner to Review & Sign, execute with the returned signature, and track status. Exact approval phrases are migration-only and are not accepted on the public V2 execution surface.
 
-For x402 paid APIs, the agent uses `search_x402_services` when you do not provide a URL, prepares the selected Bazaar service with `prepare_x402_service_request`, parses the `PAYMENT-REQUIRED` response, runs the same exact-approval payment flow, then calls `retry_x402_request` to retry the protected resource with AgentPay receipt-proof headers. The retry reads V2 `PAYMENT-RESPONSE`, keeps legacy fallback, and includes `payment-identifier` idempotency data when the server advertises it.
+For x402 paid APIs, the agent uses `search_x402_services` when you do not provide a URL, prepares the selected Bazaar service with `prepare_x402_service_request`, parses the `PAYMENT-REQUIRED` response, runs the same Review & Sign owner-authorization flow, then calls `retry_x402_request` to retry the protected resource with AgentPay receipt-proof headers. The retry reads V2 `PAYMENT-RESPONSE`, keeps legacy fallback, and includes `payment-identifier` idempotency data when the server advertises it.
 
 ## Commands
 
@@ -64,10 +64,16 @@ Fill the self-hosted config or provide equivalent environment variables:
 
 Optional values include `SETUP_WEB_URL`, `LIFI_API_KEY`, `X402_BAZAAR_FACILITATOR_URL`, `AGENTPAY_ACCOUNT_BYTECODE_PATH`, `AGENTPAY_INITIAL_ROUTE_TARGETS`, X Layer token overrides, and `AGENTPAY_A2MCP_PAYMENT_*` values for public OKX.AI A2MCP seller payments.
 
+For a production HTTP surface, use only the explicit production aliases with
+`AGENTPAY_ENVIRONMENT=production`, `AGENTPAY_HOME_CHAIN_ID=196`, and
+`AGENTPAY_ACCOUNT_VERSION=v2`. Set `AGENTPAY_MAINNET_MANIFEST_PATH` to the copied
+tracked shadow manifest when running from a published package; the repository-level
+`ops/` directory is not included in the package.
+
 ## Safety Model
 
 - Setup signatures prove wallet ownership only. They do not approve payments.
-- Payments require exact chat approval before execution.
+- Payments require a verified owner EIP-712 signature before execution; exact chat approval is migration-only.
 - The smart account enforces token and route-target allowlists, nonces, deadlines, max spend, max native fee, calldata hash checks, and allowance reset after guarded calls.
 - Keep service role keys and private keys server-side. Never paste secrets into chat.
 

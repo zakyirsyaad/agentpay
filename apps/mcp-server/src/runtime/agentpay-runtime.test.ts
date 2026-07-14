@@ -26,6 +26,10 @@ describe("parseAgentPayEnv", () => {
       LIFI_BASE_URL: " https://li.quest ",
       SETUP_WEB_URL: " https://setup.agentpay.dev/setup ",
       AGENTPAY_HOME_CHAIN_ID: " 1952 ",
+      AGENTPAY_HTTP_MODE: " consumer ",
+      AGENTPAY_ENVIRONMENT: " staging ",
+      AGENTPAY_SESSION_HASH_KEY: " session-hash-secret ",
+      AGENTPAY_REVIEW_TOKEN_SECRET: " review-token-secret-012345678901234567890123 ",
       AGENTPAY_XLAYER_TESTNET_USDC_ADDRESS: " 0x1111111111111111111111111111111111111111 ",
       AGENTPAY_XLAYER_TESTNET_USDT0_ADDRESS: " 0x2222222222222222222222222222222222222222 ",
     });
@@ -43,6 +47,10 @@ describe("parseAgentPayEnv", () => {
       lifiBaseUrl: "https://li.quest",
       setupWebUrl: "https://setup.agentpay.dev/setup",
       homeChainId: 1952,
+      httpMode: "consumer",
+      environment: "staging",
+      sessionHashKey: "session-hash-secret",
+      reviewTokenSecret: "review-token-secret-012345678901234567890123",
       stableTokenOverrides: {
         1952: {
           USDC: {
@@ -84,6 +92,57 @@ describe("parseAgentPayEnv", () => {
         assert.doesNotMatch(error.message, /0xabc123/);
         return true;
       },
+    );
+  });
+
+  it("allows loopback HTTP for local Review & Sign but requires HTTPS for remote hosts", () => {
+    const baseEnv = {
+      SUPABASE_URL: "https://agentpay.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+      XLAYER_RPC_URL: "https://rpc.xlayer.tech",
+      EXECUTOR_PRIVATE_KEY: validPrivateKey,
+    };
+
+    assert.equal(
+      parseAgentPayEnv({ ...baseEnv, SETUP_WEB_URL: "http://127.0.0.1:3000/setup" }).setupWebUrl,
+      "http://127.0.0.1:3000/setup",
+    );
+    assert.throws(
+      () => parseAgentPayEnv({ ...baseEnv, SETUP_WEB_URL: "http://wallet.agentpay.site/setup" }),
+      /SETUP_WEB_URL/,
+    );
+  });
+
+  it("uses only explicit production Supabase and mainnet RPC aliases", () => {
+    const config = parseAgentPayEnv({
+      AGENTPAY_ENVIRONMENT: "production",
+      AGENTPAY_HOME_CHAIN_ID: "196",
+      AGENTPAY_ACCOUNT_VERSION: "v2",
+      SUPABASE_PRODUCTION_URL: "https://production-project.supabase.co",
+      SUPABASE_PRODUCTION_SERVICE_ROLE_KEY: "production-service-key",
+      XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech/terigon",
+      EXECUTOR_PRIVATE_KEY: validPrivateKey,
+      AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
+      AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
+    });
+
+    assert.equal(config.supabaseUrl, "https://production-project.supabase.co");
+    assert.equal(config.serviceRoleKey, "production-service-key");
+    assert.equal(config.xlayerRpcUrl, "https://rpc.xlayer.tech/terigon");
+    assert.equal(config.homeChainId, 196);
+    assert.equal(config.environment, "production");
+
+    assert.throws(
+      () => parseAgentPayEnv({
+        AGENTPAY_ENVIRONMENT: "production",
+        AGENTPAY_HOME_CHAIN_ID: "196",
+        AGENTPAY_ACCOUNT_VERSION: "v2",
+        SUPABASE_URL: "https://qwywcungxmhoctmehcze.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "staging-service-key",
+        XLAYER_RPC_URL: "https://testrpc.xlayer.tech/terigon",
+        EXECUTOR_PRIVATE_KEY: validPrivateKey,
+      }),
+      /SUPABASE_PRODUCTION_URL|XLAYER_MAINNET_RPC_URL|production/i,
     );
   });
 });

@@ -10,6 +10,9 @@ contracts/broadcast/
 .env
 .env.*
 !.env.example
+playwright-report/
+test-results/
+blob-report/
 .DS_Store
 .worktrees/
 /AGENTS.md

@@ -1,15 +1,44 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { PaymentPayload, PaymentRequirements } from "@okxweb3/x402-core/types";
 import { describe, it } from "node:test";
 
+import { createSessionContext, type SessionContext } from "@agentpay-ai/shared";
 import type { AgentPayRuntime } from "../runtime/agentpay-runtime.ts";
+import { DEFAULT_CANARY_CAPS } from "../runtime/paid-execution-canary.ts";
+import type { CanaryLedgerStore } from "../runtime/paid-execution-canary-ledger.ts";
+import { createInMemoryInvoiceExecutionOutboxStore } from "../services/paid-execution-outbox.ts";
+import { createInMemoryPaidExecutionLifecycleStore } from "../services/paid-execution-lifecycle.ts";
+import type { PaymentIntentRecord } from "@agentpay-ai/shared";
 import type { AgentPayMcpPaymentProcessor } from "./okx-agent-payment.ts";
 import { startAgentPayHttpServer } from "./http.ts";
 import type { ConnectableAgentPayMcpServer } from "./stdio.ts";
 
 describe("startAgentPayHttpServer", () => {
+  it("rejects a mainnet paid public surface without the production chain boundary", async () => {
+    await assert.rejects(
+      () =>
+        startAgentPayHttpServer({
+          env: {
+            ...mcpEnv(),
+            AGENTPAY_HOME_CHAIN_ID: "1952",
+            AGENTPAY_A2MCP_PAYMENT_ENABLED: "true",
+            AGENTPAY_A2MCP_PAYMENT_PAY_TO: "0x0000000000000000000000000000000000000002",
+            AGENTPAY_A2MCP_PAYMENT_PRICE: "$0.01",
+            AGENTPAY_A2MCP_PAYMENT_NETWORK: "eip155:196",
+            AGENTPAY_A2MCP_PAYMENT_FACILITATOR_URL: "https://facilitator.example.com",
+          },
+          hostname: "127.0.0.1",
+          port: 0,
+        }),
+      /mainnet.*production|production.*mainnet/i,
+    );
+  });
+
   it("serves health checks and MCP tools over Streamable HTTP", async () => {
     const server = await startAgentPayHttpServer({
       env: mcpEnv(),
@@ -36,9 +65,7 @@ describe("startAgentPayHttpServer", () => {
       const tools = await client.listTools();
       await client.close();
 
-      assert.ok(tools.tools.some((tool) => tool.name === "prepare_wallet_creation"));
-      assert.ok(tools.tools.some((tool) => tool.name === "execute_payment"));
-      assert.ok(tools.tools.some((tool) => tool.name === "search_x402_services"));
+      assert.deepEqual(tools.tools.map((tool) => tool.name), ["execute_payment"]);
     } finally {
       await server.close();
     }
@@ -101,7 +128,7 @@ describe("startAgentPayHttpServer", () => {
     }
   });
 
-  it("keeps MCP discovery free but charges MCP tool calls when payments are enabled", async () => {
+  it("rejects non-public MCP tools before issuing a paid challenge", async () => {
     let paymentCalls = 0;
     let walletSetupWasCalled = false;
     const paymentProcessor = createPaymentProcessor({
@@ -170,18 +197,20 @@ describe("startAgentPayHttpServer", () => {
         }),
       });
 
-      assert.ok(tools.tools.some((tool) => tool.name === "prepare_wallet_creation"));
-      assert.equal(toolCallResponse.status, 402);
-      assert.equal(toolCallResponse.headers.get("PAYMENT-REQUIRED"), "tool-call-challenge");
-      assert.deepEqual(await toolCallResponse.json(), { error: "Payment required." });
-      assert.equal(paymentCalls, 1);
+      assert.deepEqual(tools.tools.map((tool) => tool.name), ["execute_payment"]);
+      assert.equal(toolCallResponse.status, 400);
+      assert.deepEqual(await toolCallResponse.json(), {
+        error: "The public paid surface accepts only the execute_payment MCP tool.",
+        code: "PAID_TOOL_NOT_ALLOWED",
+      });
+      assert.equal(paymentCalls, 0);
       assert.equal(walletSetupWasCalled, false);
     } finally {
       await server.close();
     }
   });
 
-  it("returns an OKX Agent Payments Protocol challenge before serving protected MCP methods", async () => {
+  it("rejects non-execute public methods before issuing an OKX payment challenge", async () => {
     let mcpServerWasCreated = false;
     const paymentProcessor = createPaymentProcessor({
       async processHTTPRequest(context) {
@@ -246,16 +275,19 @@ describe("startAgentPayHttpServer", () => {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "resources/read", params: { uri: "paid://probe" } }),
       });
 
-      assert.equal(response.status, 402);
-      assert.equal((response.headers.get("PAYMENT-REQUIRED") ?? "").length > 0, true);
-      assert.deepEqual(await response.json(), { error: "Payment required." });
+      assert.equal(response.status, 400);
+      assert.equal(response.headers.get("PAYMENT-REQUIRED"), null);
+      assert.deepEqual(await response.json(), {
+        error: "The public paid surface accepts only the execute_payment MCP tool.",
+        code: "PAID_TOOL_NOT_ALLOWED",
+      });
       assert.equal(mcpServerWasCreated, false);
     } finally {
       await server.close();
     }
   });
 
-  it("returns a payment challenge for generic endpoint probes when MCP payments are enabled", async () => {
+  it("keeps GET probes payable but rejects malformed POSTs before x402", async () => {
     let mcpServerWasCreated = false;
     const paymentProcessor = createPaymentProcessor({
       async processHTTPRequest(context) {
@@ -301,15 +333,264 @@ describe("startAgentPayHttpServer", () => {
       assert.equal(getResponse.status, 402);
       assert.equal(getResponse.headers.get("PAYMENT-REQUIRED"), "probe-challenge");
       assert.deepEqual(await getResponse.json(), { error: "Payment required." });
-      assert.equal(malformedPostResponse.status, 402);
-      assert.equal(malformedPostResponse.headers.get("PAYMENT-REQUIRED"), "probe-challenge");
+      assert.equal(malformedPostResponse.status, 400);
+      assert.equal(malformedPostResponse.headers.get("PAYMENT-REQUIRED"), null);
       assert.equal(mcpServerWasCreated, false);
     } finally {
       await server.close();
     }
   });
 
-  it("forwards paid MCP requests and settles after the MCP response", async () => {
+  it("runs signed payment preflight before x402 processing", async () => {
+    let processorCalls = 0;
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        processorCalls += 1;
+        return {
+          type: "payment-error",
+          response: {
+            status: 402,
+            headers: { "PAYMENT-REQUIRED": "must-not-run" },
+            body: { error: "Payment required." },
+          },
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime({
+          async preflightPayment() {
+            throw new Error("expired intent");
+          },
+        });
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "execute_payment",
+            arguments: { paymentIntentId: "pay_expired", signature: `0x${"11".repeat(65)}` },
+          },
+        }),
+      });
+
+      assert.equal(response.status, 422);
+      assert.deepEqual(await response.json(), {
+        error: "Paid execution preflight failed.",
+        code: "PAID_PREFLIGHT_FAILED",
+      });
+      assert.equal(processorCalls, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects a non-allowlisted canary intent before issuing an x402 challenge", async () => {
+    let processorCalls = 0;
+    const policy = canaryPolicy();
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging", AGENTPAY_EXECUTION_MODE: "CANARY" },
+      hostname: "127.0.0.1",
+      port: 0,
+      canaryPolicy: policy,
+      canaryLedger: createTestCanaryLedger(),
+      paymentProcessor: createPaymentProcessor({
+        async processHTTPRequest() {
+          processorCalls += 1;
+          return { type: "payment-error", response: { status: 402, headers: {}, body: { error: "challenge" } } };
+        },
+      }),
+      createRuntime() {
+        return createRuntime({
+          async preflightPayment(input) {
+            return { paymentIntentId: input.paymentIntentId, intent: { ...canaryIntent(), recipientAddress: "0x9999999999999999999999999999999999999999" }, input };
+          },
+        });
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_canary", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), {
+        error: "Payment recipient is outside the canary allowlist.",
+        code: "CANARY_ALLOWLIST",
+      });
+      assert.equal(processorCalls, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("reserves the canary ledger before settlement and completes it after a successful invoice", async () => {
+    const calls: string[] = [];
+    const policy = canaryPolicy();
+    const ledger = createTestCanaryLedger(calls);
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        return {
+          type: "payment-verified",
+          paymentPayload: createPaymentPayload(policy.allowlist.payerAddress),
+          paymentRequirements: createCanaryPaymentRequirements(),
+        };
+      },
+      async processSettlement() {
+        calls.push("settle");
+        return {
+          success: true,
+          status: "success",
+          transaction: `0x${"88".repeat(32)}`,
+          network: "eip155:196",
+          headers: {},
+          requirements: createCanaryPaymentRequirements(),
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging", AGENTPAY_EXECUTION_MODE: "CANARY" },
+      hostname: "127.0.0.1",
+      port: 0,
+      canaryPolicy: policy,
+      canaryLedger: ledger,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime({
+          async preflightPayment(input) {
+            return { paymentIntentId: input.paymentIntentId, intent: canaryIntent(), input };
+          },
+          async executePayment() {
+            calls.push("execute");
+            return {
+              paymentIntentId: "pay_canary",
+              status: "EXECUTING",
+              sourceTxHash: `0x${"99".repeat(32)}`,
+              message: "Payment execution started.",
+            };
+          },
+        });
+      },
+    });
+
+    try {
+      const request = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "execute_payment", arguments: { paymentIntentId: "pay_canary", signature: `0x${"11".repeat(65)}` } },
+      };
+      const headers = {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "PAYMENT-SIGNATURE": "paid",
+      };
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(request),
+      });
+
+      assert.equal(response.status, 200);
+      const firstBody = await response.text();
+      const replay = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...request, id: 2 }),
+      });
+      assert.equal(replay.status, 200);
+      assert.equal(await replay.text(), firstBody);
+      assert.deepEqual(calls, ["reserve", "settle", "execute", "complete"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("fails closed when a paid public request has no payment processor", async () => {
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_missing_processor", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: "Paid payment processor unavailable.",
+        code: "PAID_PROCESSOR_UNAVAILABLE",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("fails closed when the payment processor returns no-payment-required for a paid request", async () => {
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor: createPaymentProcessor({}),
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_protocol_error", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: "Paid payment processor returned no payment proof.",
+        code: "PAID_PROCESSOR_PROTOCOL_ERROR",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("settles a paid MCP request before serving the MCP response", async () => {
     const calls: string[] = [];
     const paymentProcessor = createPaymentProcessor({
       async processHTTPRequest(context) {
@@ -323,14 +604,15 @@ describe("startAgentPayHttpServer", () => {
       },
       async processSettlement(_payload, _requirements, _extensions, transportContext) {
         calls.push(`settle:${transportContext?.responseBody?.byteLength ?? 0}`);
+        assert.equal(transportContext?.responseBody, undefined);
 
         return {
           success: true,
           status: "success",
-          transaction: "0xsettled",
+          transaction: `0x${"55".repeat(32)}`,
           network: "eip155:196",
           headers: {
-            "PAYMENT-RESPONSE": Buffer.from(JSON.stringify({ success: true, transaction: "0xsettled" })).toString(
+            "PAYMENT-RESPONSE": Buffer.from(JSON.stringify({ success: true, transaction: `0x${"55".repeat(32)}` })).toString(
               "base64",
             ),
           },
@@ -345,6 +627,15 @@ describe("startAgentPayHttpServer", () => {
       paymentProcessor,
       createRuntime() {
         return createRuntime({
+          async executePayment() {
+            calls.push("execute");
+            return {
+              paymentIntentId: "pay_x402",
+              status: "EXECUTING",
+              sourceTxHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              message: "Payment execution started.",
+            };
+          },
           async retryX402Request() {
             return {
               status: "RESOURCE_FETCHED",
@@ -374,17 +665,10 @@ describe("startAgentPayHttpServer", () => {
           id: 1,
           method: "tools/call",
           params: {
-            name: "retry_x402_request",
+            name: "execute_payment",
             arguments: {
               paymentIntentId: "pay_x402",
-              paymentRequired: {
-                x402Version: 2,
-                resource: {
-                  url: "https://api.example.com/protected",
-                  method: "GET",
-                },
-                accepts: [],
-              },
+              signature: `0x${"11".repeat(65)}`,
             },
           },
         }),
@@ -393,9 +677,538 @@ describe("startAgentPayHttpServer", () => {
 
       assert.equal(response.status, 200);
       assert.equal((response.headers.get("PAYMENT-RESPONSE") ?? "").length > 0, true);
-      assert.match(responseText, /paid payload/);
+      assert.match(responseText, /Payment execution started/);
       assert.equal(calls[0], "process:paid");
-      assert.match(calls[1] ?? "", /^settle:\d+$/);
+      assert.equal(calls[1], "settle:0");
+      assert.equal(calls[2], "execute");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("reserves the durable invoice outbox before fee settlement", async () => {
+    const calls: string[] = [];
+    const outbox = createInMemoryInvoiceExecutionOutboxStore();
+    const lifecycle = createInMemoryPaidExecutionLifecycleStore();
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        return {
+          type: "payment-verified",
+          paymentPayload: createPaymentPayload(),
+          paymentRequirements: createPaymentRequirements(),
+        };
+      },
+      async processSettlement() {
+        calls.push(`settle:${(await outbox.listRecoverable(new Date().toISOString())).length}`);
+        return {
+          success: true,
+          status: "success",
+          transaction: `0x${"56".repeat(32)}`,
+          network: "eip155:196",
+          headers: {},
+          requirements: createPaymentRequirements(),
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_RAW_TX_ENCRYPTION_KEY: "r".repeat(64) },
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      paidExecutionLifecycle: lifecycle,
+      invoiceExecutionOutbox: outbox,
+      createRuntime() {
+        return createRuntime({
+          executorAddress: "0x9999999999999999999999999999999999999999",
+          async preflightPayment(input) {
+            return { paymentIntentId: input.paymentIntentId, intent: reservationIntent(), input };
+          },
+          async executePaymentWithContext(_input, context) {
+            calls.push(`execute:${(await context.outbox.get(context.outboxId))?.status}`);
+            return {
+              paymentIntentId: "pay_reservation",
+              status: "EXECUTING",
+              sourceTxHash: `0x${"aa".repeat(32)}`,
+              message: "Payment execution started.",
+            };
+          },
+        });
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "PAYMENT-SIGNATURE": "paid",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_reservation", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(calls, ["settle:1", "execute:QUEUED"]);
+      const records = await outbox.listRecoverable(new Date().toISOString());
+      assert.equal(records.length, 1);
+      assert.equal(records[0]?.status, "QUEUED");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("replays a completed paid lifecycle without settling or executing twice", async () => {
+    let settlementCalls = 0;
+    let executeCalls = 0;
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        return {
+          type: "payment-verified",
+          paymentPayload: createPaymentPayload(),
+          paymentRequirements: createPaymentRequirements(),
+        };
+      },
+      async processSettlement() {
+        settlementCalls += 1;
+        return {
+          success: true,
+          status: "success",
+          transaction: `0x${"33".repeat(32)}`,
+          network: "eip155:196",
+          headers: { "PAYMENT-RESPONSE": "receipt" },
+          requirements: createPaymentRequirements(),
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime({
+          async executePayment() {
+            executeCalls += 1;
+            return {
+              paymentIntentId: "pay_x402",
+              status: "EXECUTING",
+              sourceTxHash: `0x${"44".repeat(32)}`,
+              message: "Payment execution started.",
+            };
+          },
+        });
+      },
+    });
+
+    try {
+      const request = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "execute_payment",
+          arguments: { paymentIntentId: "pay_x402", signature: `0x${"11".repeat(65)}` },
+        },
+      };
+      const headers = {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "PAYMENT-SIGNATURE": "paid",
+      };
+      const first = await fetch(server.mcpUrl, { method: "POST", headers, body: JSON.stringify(request) });
+      const firstBody = await first.text();
+      const second = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers,
+        // JSON-RPC ids are transport correlation values; a lost-response
+        // retry may legitimately use a fresh id and must still replay.
+        body: JSON.stringify({ ...request, id: 2 }),
+      });
+      const secondBody = await second.text();
+
+      assert.equal(first.status, 200);
+      assert.equal(second.status, 200);
+      assert.equal(secondBody, firstBody);
+      assert.equal(settlementCalls, 1);
+      assert.equal(executeCalls, 1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not create or execute the MCP request when paid settlement fails", async () => {
+    let mcpServerWasCreated = false;
+    let executeWasCalled = false;
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        return {
+          type: "payment-verified",
+          paymentPayload: createPaymentPayload(),
+          paymentRequirements: createPaymentRequirements(),
+        };
+      },
+      async processSettlement() {
+        return {
+          success: false,
+          status: "failed",
+          errorReason: "FACILITATOR_REJECTED",
+          transaction: `0x${"66".repeat(32)}`,
+          network: "eip155:196",
+          headers: {},
+          response: {
+            status: 402,
+            headers: { "content-type": "application/json" },
+            body: { error: "Payment settlement failed." },
+          },
+        } as never;
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime({
+          async executePayment() {
+            executeWasCalled = true;
+            throw new Error("execution must not run after settlement failure");
+          },
+        });
+      },
+      createServer(runtime) {
+        mcpServerWasCreated = true;
+        return createFakeMcpServer(runtime);
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "PAYMENT-SIGNATURE": "paid",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_x402", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 402);
+      assert.equal(mcpServerWasCreated, false);
+      assert.equal(executeWasCalled, false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("fails closed in consumer mode before creating a runtime and keeps health free", async () => {
+    let runtimeCreations = 0;
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging" },
+      hostname: "127.0.0.1",
+      port: 0,
+      mode: "consumer",
+      consumerAuth: {
+        async authenticate() {
+          throw new Error("invalid session");
+        },
+      },
+      createRuntime() {
+        runtimeCreations += 1;
+        return createRuntime();
+      },
+    });
+
+    try {
+      const health = await fetch(server.healthUrl);
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      });
+
+      assert.equal(health.status, 200);
+      assert.equal(response.status, 401);
+      assert.deepEqual(await response.json(), { error: "Consumer authentication required." });
+      assert.equal(runtimeCreations, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps production shadow/OFF liveness separate from readiness and blocks public execution", async () => {
+    let runtimeCreations = 0;
+    const server = await startAgentPayHttpServer({
+      env: productionMcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor: {
+        async processHTTPRequest() {
+          throw new Error("injected production payment processor must not bypass readiness");
+        },
+        async processSettlement() {
+          throw new Error("injected production settlement must not run");
+        },
+      },
+      createRuntime() {
+        runtimeCreations += 1;
+        return createRuntime();
+      },
+    });
+
+    try {
+      const health = await fetch(server.healthUrl);
+      const readiness = await fetch(server.readinessUrl);
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_1", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).ok, true);
+      assert.equal(readiness.status, 503);
+      assert.equal((await readiness.json()).code, "PRODUCTION_NOT_READY");
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: "Production execution unavailable.",
+        code: "PRODUCTION_NOT_READY",
+      });
+      assert.equal(runtimeCreations, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("loads an explicit production manifest path for the published package layout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentpay-manifest-test-"));
+    const manifestPath = join(directory, "shadow.json");
+    const manifest = JSON.parse(
+      await readFile(new URL("../../../../ops/manifests/xlayer-mainnet.shadow.json", import.meta.url), "utf8"),
+    ) as Record<string, unknown>;
+    manifest.executionMode = "PUBLIC";
+    await writeFile(
+      manifestPath,
+      JSON.stringify(manifest),
+    );
+
+    try {
+      const server = await startAgentPayHttpServer({
+        env: {
+          ...productionMcpEnv(),
+          AGENTPAY_MAINNET_MANIFEST_PATH: manifestPath,
+        },
+        hostname: "127.0.0.1",
+        port: 0,
+      });
+
+      try {
+        const readiness = await fetch(server.readinessUrl);
+        assert.equal(readiness.status, 503);
+        assert.equal((await readiness.json()).mode, "PUBLIC");
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("derives the consumer boundary from runtime env without exposing a global sessionless runtime", async () => {
+    const server = await startAgentPayHttpServer({
+      env: {
+        ...mcpEnv(),
+        AGENTPAY_HTTP_MODE: "consumer",
+        AGENTPAY_ENVIRONMENT: "staging",
+        AGENTPAY_SESSION_HASH_KEY: "consumer-session-secret",
+      },
+      hostname: "127.0.0.1",
+      port: 0,
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      assert.equal(response.status, 401);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("routes SIWE challenge and verify requests to the dedicated session API", async () => {
+    const paths: string[] = [];
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging" },
+      hostname: "127.0.0.1",
+      port: 0,
+      mode: "consumer",
+      consumerAuth: {
+        async authenticate() {
+          throw new Error("MCP auth should not be reached for the session API route.");
+        },
+      },
+      sessionApi: {
+        async handle(request) {
+          paths.push(new URL(request.url).pathname);
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(new URL("/auth/siwe/challenge", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(paths, ["/auth/siwe/challenge"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("authenticates consumer MCP requests and builds a tenant-scoped runtime", async () => {
+    const trustedContext: SessionContext = createSessionContext({
+      sessionId: "session_123",
+      tenantId: "tenant_a",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      homeChainId: 1952,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["wallet:read"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    });
+    let receivedContext: SessionContext | undefined;
+    const credential = "a".repeat(43);
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging" },
+      hostname: "127.0.0.1",
+      port: 0,
+      mode: "consumer",
+      consumerAuth: {
+        async authenticate(receivedCredential) {
+          assert.equal(receivedCredential, credential);
+          return trustedContext;
+        },
+      },
+      createRuntime(_config, context) {
+        receivedContext = context;
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential}`,
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(receivedContext, trustedContext);
+      assert.equal(response.headers.get("access-control-allow-origin"), "https://wallet.agentpay.site");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("enforces scope and owner-signature guards on real consumer MCP tool calls", async () => {
+    const trustedContext: SessionContext = createSessionContext({
+      sessionId: "session_123",
+      tenantId: "tenant_a",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      homeChainId: 1952,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["payment:read"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    });
+    const credential = "b".repeat(43);
+    const server = await startAgentPayHttpServer({
+      env: { ...mcpEnv(), AGENTPAY_ENVIRONMENT: "staging" },
+      hostname: "127.0.0.1",
+      port: 0,
+      mode: "consumer",
+      consumerAuth: {
+        async authenticate(receivedCredential) {
+          assert.equal(receivedCredential, credential);
+          return trustedContext;
+        },
+      },
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const headers = {
+        authorization: `Bearer ${credential}`,
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      };
+      const scopeResponse = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get_balance", arguments: {} },
+        }),
+      });
+      assert.equal(scopeResponse.status, 200);
+      assert.match(await scopeResponse.text(), /scope/i);
+
+      const executionResponse = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_1", approvalText: "x" } },
+        }),
+      });
+      assert.equal(executionResponse.status, 200);
+      assert.match(await executionResponse.text(), /public paid ASP/i);
     } finally {
       await server.close();
     }
@@ -408,6 +1221,22 @@ function mcpEnv(): Record<string, string> {
     SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
     XLAYER_RPC_URL: "https://rpc.xlayer.tech",
     EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+  };
+}
+
+function productionMcpEnv(): Record<string, string> {
+  return {
+    AGENTPAY_ENVIRONMENT: "production",
+    AGENTPAY_HOME_CHAIN_ID: "196",
+    AGENTPAY_ACCOUNT_VERSION: "v2",
+    SUPABASE_PRODUCTION_URL: "https://abcdefghijklmnopqrst.supabase.co",
+    SUPABASE_PRODUCTION_SERVICE_ROLE_KEY: "service-role-key",
+    DIRECT_URL_PRODUCTION: "postgresql://production.example.invalid/postgres",
+    XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech/terigon",
+    EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+    SETUP_DEPLOYER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
+    AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
+    AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
   };
 }
 
@@ -458,8 +1287,17 @@ function createRuntime(overrides: Partial<AgentPayRuntime> = {}): AgentPayRuntim
     async preparePayment() {
       throw new Error("preparePayment was not expected.");
     },
+    async getPaymentSignature() {
+      throw new Error("getPaymentSignature was not expected.");
+    },
     async executePayment() {
       throw new Error("executePayment was not expected.");
+    },
+    async preflightPayment(input) {
+      return { paymentIntentId: input.paymentIntentId, intent: {} as never, input };
+    },
+    async executeAuthorizedPayment() {
+      throw new Error("executeAuthorizedPayment was not expected.");
     },
     async trackPayment() {
       throw new Error("trackPayment was not expected.");
@@ -484,7 +1322,7 @@ function createPaymentProcessor(overrides: Partial<AgentPayMcpPaymentProcessor>)
     async processSettlement() {
       return {
         success: true,
-        transaction: "0x0",
+        transaction: `0x${"77".repeat(32)}`,
         network: "eip155:196",
         headers: {},
         requirements: createPaymentRequirements(),
@@ -506,11 +1344,127 @@ function createPaymentRequirements(): PaymentRequirements {
   };
 }
 
-function createPaymentPayload(): PaymentPayload {
+function createPaymentPayload(payer = "0x4444444444444444444444444444444444444444"): PaymentPayload {
   return {
     x402Version: 2,
     accepted: createPaymentRequirements(),
-    payload: {},
+    payload: {
+      authorization: {
+        from: payer,
+      },
+    },
+  };
+}
+
+function createCanaryPaymentRequirements(): PaymentRequirements {
+  return {
+    scheme: "exact",
+    network: "eip155:196",
+    asset: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    amount: "10000",
+    payTo: "0x0000000000000000000000000000000000000002",
+    maxTimeoutSeconds: 300,
+    extra: {},
+  };
+}
+
+function canaryPolicy() {
+  return {
+    allowlist: {
+      tenantId: "11111111-1111-4111-8111-111111111111",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      payerAddress: "0x3333333333333333333333333333333333333333",
+      recipientAddress: "0x4444444444444444444444444444444444444444",
+    },
+    caps: DEFAULT_CANARY_CAPS,
+  };
+}
+
+function canaryIntent(): PaymentIntentRecord {
+  const policy = canaryPolicy();
+  return {
+    id: "pay_canary",
+    tenantId: policy.allowlist.tenantId,
+    accountAddress: policy.allowlist.accountAddress,
+    ownerAddress: policy.allowlist.ownerAddress,
+    status: "AWAITING_APPROVAL",
+    paymentType: "WALLET_PAYMENT",
+    sourceChainId: 196,
+    destinationChainId: 196,
+    sourceTokenAddress: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    sourceTokenSymbol: "USDT0",
+    destinationTokenAddress: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+    destinationTokenSymbol: "USDT0",
+    recipientAddress: policy.allowlist.recipientAddress,
+    amountOut: "0.10",
+    maxAmountIn: "0.10",
+    minAmountOut: "0.10",
+    nativeValue: "0",
+    maxNativeFee: "0",
+    routeProvider: "DIRECT",
+    routeTarget: "0x0000000000000000000000000000000000000000",
+    routeCalldata: "0x",
+    routeCalldataHash: "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+    routeSummary: "Direct payment.",
+    nonce: "1",
+    deadline: "2099-01-01T00:00:00.000Z",
+    purpose: "canary invoice",
+    approvalPhrase: "APPROVE pay_canary",
+  };
+}
+
+function createTestCanaryLedger(calls: string[] = []): CanaryLedgerStore {
+  let reserved = false;
+  return {
+    async snapshot() {
+      return {
+        acceptedLifecycles: reserved ? 1 : 0,
+        tenantDailyAtomic: reserved ? 100000n : 0n,
+        globalDailyAtomic: reserved ? 100000n : 0n,
+        tenantInFlight: reserved ? 1 : 0,
+      };
+    },
+    async reserve() {
+      calls.push("reserve");
+      if (reserved) return { disposition: "REPLAY", usage: { acceptedLifecycles: 1, tenantDailyAtomic: 100000n, globalDailyAtomic: 100000n, tenantInFlight: 1 } };
+      reserved = true;
+      return { disposition: "RESERVED", usage: { acceptedLifecycles: 1, tenantDailyAtomic: 100000n, globalDailyAtomic: 100000n, tenantInFlight: 1 } };
+    },
+    async complete() {
+      calls.push("complete");
+      return { acceptedLifecycles: 1, tenantDailyAtomic: 100000n, globalDailyAtomic: 100000n, tenantInFlight: 0 };
+    },
+  };
+}
+
+function reservationIntent(): PaymentIntentRecord {
+  return {
+    id: "pay_reservation",
+    tenantId: "tenant_1",
+    accountAddress: "0x3333333333333333333333333333333333333333",
+    ownerAddress: "0x4444444444444444444444444444444444444444",
+    status: "AWAITING_APPROVAL",
+    paymentType: "WALLET_PAYMENT",
+    sourceChainId: 196,
+    destinationChainId: 196,
+    sourceTokenAddress: "0x5555555555555555555555555555555555555555",
+    sourceTokenSymbol: "USDT0",
+    destinationTokenAddress: "0x5555555555555555555555555555555555555555",
+    destinationTokenSymbol: "USDT0",
+    recipientAddress: "0x6666666666666666666666666666666666666666",
+    amountOut: "1",
+    maxAmountIn: "1",
+    maxNativeFee: "0",
+    routeProvider: "DIRECT",
+    routeTarget: "0x0000000000000000000000000000000000000000",
+    routeCalldata: "0x",
+    routeCalldataHash: "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+    routeSummary: "Direct payment.",
+    nonce: "1",
+    deadline: "2099-01-01T00:00:00.000Z",
+    purpose: "invoice payment",
+    approvalPhrase: "APPROVE pay_reservation",
   };
 }
 

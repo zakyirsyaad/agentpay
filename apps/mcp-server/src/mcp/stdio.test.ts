@@ -42,6 +42,26 @@ describe("createAgentPayMcpServer", () => {
 });
 
 describe("startAgentPayMcpServer", () => {
+  it("fails closed instead of starting a production stdio execution surface", async () => {
+    await assert.rejects(
+      () =>
+        startAgentPayMcpServer({
+          env: {
+            AGENTPAY_ENVIRONMENT: "production",
+            AGENTPAY_HOME_CHAIN_ID: "196",
+            AGENTPAY_ACCOUNT_VERSION: "v2",
+            SUPABASE_PRODUCTION_URL: "https://abcdefghijklmnopqrst.supabase.co",
+            SUPABASE_PRODUCTION_SERVICE_ROLE_KEY: "production-service-role-key",
+            XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech",
+            EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+            AGENTPAY_SESSION_HASH_KEY: "session-hash-key-012345678901234567890123",
+            AGENTPAY_REVIEW_TOKEN_SECRET: "review-token-secret-012345678901234567890123",
+          },
+        }),
+      /readiness-gated HTTP surface/i,
+    );
+  });
+
   it("parses env, creates runtime, and connects the stdio transport", async () => {
     const runtime = createRuntime();
     const transport = { kind: "stdio" };
@@ -122,6 +142,9 @@ function createRuntime(): AgentPayRuntime {
     async preparePayment() {
       throw new Error("preparePayment was not expected.");
     },
+    async getPaymentSignature() {
+      throw new Error("getPaymentSignature was not expected.");
+    },
     async checkRouteTargetAllowance() {
       throw new Error("checkRouteTargetAllowance was not expected.");
     },
@@ -133,6 +156,9 @@ function createRuntime(): AgentPayRuntime {
     },
     async executePayment() {
       throw new Error("executePayment was not expected.");
+    },
+    async executeAuthorizedPayment() {
+      throw new Error("executeAuthorizedPayment was not expected.");
     },
     async trackPayment() {
       throw new Error("trackPayment was not expected.");

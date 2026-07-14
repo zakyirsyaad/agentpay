@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import type { SetupIntentRecord } from "@agentpay-ai/shared";
 
-import { createSetupWebHandler, renderSetupPage } from "./server.ts";
+import { createSetupWebHandler, renderSetupPage, startSetupWebServer } from "./server.ts";
 
 const setupIntent: SetupIntentRecord = {
   id: "setup_123",
@@ -34,6 +34,16 @@ describe("createSetupWebHandler", () => {
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type") ?? "", /text\/html/);
     assert.match(await response.text(), /AgentPay setup/);
+  });
+
+  it("serves the Review & Sign page with a no-store CSP", async () => {
+    const handler = createSetupWebHandler(createDependencies());
+    const response = await handler(new Request("http://localhost:3000/review"));
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+    assert.match(await response.text(), /Review &amp; Sign/);
   });
 
   it("returns setup intent JSON", async () => {
@@ -92,6 +102,74 @@ describe("createSetupWebHandler", () => {
         signature: `0x${"a".repeat(130)}`,
       },
     ]);
+  });
+});
+
+describe("startSetupWebServer", () => {
+  it("returns the actual ephemeral port selected by the operating system", async () => {
+    const server = await startSetupWebServer(createDependencies(), { port: 0 });
+
+    try {
+      const url = new URL(server.url);
+      assert.notEqual(url.port, "0");
+      assert.equal((await fetch(new URL("/review", url))).status, 200);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("returns a generic no-store response when a dependency fails", async () => {
+    const server = await startSetupWebServer(createDependencies({
+      async getSetupIntent() {
+        throw new Error("sensitive repository failure");
+      },
+    }), { port: 0 });
+
+    try {
+      const response = await fetch(new URL("/api/setup-intents/setup_123", server.url));
+      const body = await response.json();
+      assert.equal(response.status, 503);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.deepEqual(body, { error: "Service unavailable." });
+      assert.doesNotMatch(JSON.stringify(body), /sensitive repository failure/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("uses the proxy-appended client address instead of a spoofed forwarded prefix", async () => {
+    const clientIds: string[] = [];
+    const server = await startSetupWebServer(createDependencies({
+      rateLimiter: {
+        allow(_token, _now, clientId) {
+          clientIds.push(clientId ?? "direct");
+          return false;
+        },
+        entryCount: 0,
+        clientEntryCount: 0,
+      },
+    }), { port: 0 });
+
+    try {
+      const reviewUrl = new URL("/api/payment-review", server.url);
+      const token = `apr_${"a".repeat(43)}`;
+      await fetch(reviewUrl, {
+        headers: {
+          "x-agentpay-review-token": token,
+          "x-forwarded-for": "203.0.113.111, 198.51.100.42",
+        },
+      });
+      await fetch(reviewUrl, {
+        headers: {
+          "x-agentpay-review-token": token,
+          "x-forwarded-for": "203.0.113.222, 198.51.100.42",
+        },
+      });
+
+      assert.deepEqual(clientIds, ["198.51.100.42", "198.51.100.42"]);
+    } finally {
+      await server.close();
+    }
   });
 });
 

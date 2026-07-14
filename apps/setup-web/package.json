@@ -10,6 +10,7 @@
     "src/index.ts",
     "src/runtime.ts",
     "src/server.ts",
+    "src/payment-review.ts",
     "src/services/account-deployer.ts",
     "src/services/complete-wallet-setup.ts",
     "src/start.ts"
@@ -20,6 +21,7 @@
   "scripts": {
     "start": "tsx src/start.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
+    "test:e2e": "playwright test --config playwright.config.ts",
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
   },
   "dependencies": {

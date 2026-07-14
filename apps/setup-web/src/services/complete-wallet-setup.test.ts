@@ -92,10 +92,10 @@ describe("completeWalletSetup", () => {
         {
           ownerAddress: owner.address,
           executorAddress,
-          homeChainId: 196,
+          homeChainId: 1952,
           initialAllowedTokenAddresses: [
-            "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-            "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+            "0x9e29b3AaDa05Bf2D2c827Af80Bd28Dc0b9b4FB0c",
+            "0xcB8BF24c6cE16Ad21D707c9505421a17f2bec79D",
           ],
           initialAllowedRouteTargets: [],
         },
@@ -105,7 +105,7 @@ describe("completeWalletSetup", () => {
         {
           ownerAddress: owner.address,
           accountAddress,
-          homeChainId: 196,
+          homeChainId: 1952,
           executorAddress,
           status: "ACTIVE",
         },
@@ -163,6 +163,94 @@ describe("completeWalletSetup", () => {
     );
 
     assert.equal(failed[0]?.[1], "OWNER_MISMATCH");
+  });
+
+  it("binds a verified owner tenant before storing the fresh account", async () => {
+    const signature = await owner.signMessage(setupIntent.messageToSign);
+    let signedTenantId: string | undefined;
+    let storedTenantId: string | undefined;
+
+    await completeWalletSetup(
+      { setupIntentId: setupIntent.id, signature },
+      {
+        setupIntents: {
+          async getSetupIntent() {
+            return setupIntent;
+          },
+          async markSetupSigned(_setupIntentId, _ownerAddress, _signature, tenantId) {
+            signedTenantId = tenantId;
+          },
+          async markSetupCompleted() {},
+          async markSetupExpired() {},
+          async markSetupFailed() {},
+        },
+        wallets: {
+          async createAgentWallet(wallet) {
+            storedTenantId = wallet.tenantId;
+          },
+        },
+        deployer: {
+          async deployAgentPayAccount() {
+            return { accountAddress };
+          },
+        },
+        signatureVerifier: createEthersSetupSignatureVerifier(),
+        clock: () => new Date("2026-07-03T04:02:00.000Z"),
+        bindVerifiedOwner: async () => ({ tenantId: "tenant_owner_a" }),
+      },
+    );
+
+    assert.equal(signedTenantId, "tenant_owner_a");
+    assert.equal(storedTenantId, "tenant_owner_a");
+  });
+
+  it("rejects a custom token allowlist before a mainnet setup deployment", async () => {
+    let deployments = 0;
+    let failures = 0;
+
+    await assert.rejects(
+      () =>
+        completeWalletSetup(
+          { setupIntentId: "setup_mainnet", signature: `0x${"c".repeat(130)}` },
+          {
+            setupIntents: {
+              async getSetupIntent() {
+                return { ...setupIntent, id: "setup_mainnet", homeChainId: 196 };
+              },
+              async markSetupSigned() {
+                throw new Error("setup must not be marked signed before allowlist validation");
+              },
+              async markSetupCompleted() {},
+              async markSetupExpired() {},
+              async markSetupFailed() {
+                failures += 1;
+              },
+            },
+            wallets: {
+              async createAgentWallet() {},
+            },
+            deployer: {
+              async deployAgentPayAccount() {
+                deployments += 1;
+                return { accountAddress };
+              },
+            },
+            signatureVerifier: {
+              async recoverSignerAddress() {
+                return owner.address;
+              },
+            },
+            clock: () => new Date("2026-07-03T04:02:00.000Z"),
+            initialAllowedTokenAddresses: [
+              "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+            ],
+          },
+        ),
+      /canonical USDT0 token allowlist/i,
+    );
+
+    assert.equal(deployments, 0);
+    assert.equal(failures, 1);
   });
 
   it("uses the setup intent home chain when storing the deployed wallet", async () => {

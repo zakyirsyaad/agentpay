@@ -1,7 +1,9 @@
 import {
+  AgentPayAuthError,
   checkWalletCreationInputSchema,
   checkRouteTargetAllowanceInputSchema,
   executePaymentInputSchema,
+  getPaymentSignatureInputSchema,
   getBalanceInputSchema,
   getAgentWalletInputSchema,
   listPaymentEventsInputSchema,
@@ -18,11 +20,15 @@ import {
   retryX402RequestInputSchema,
   searchX402ServicesInputSchema,
   trackPaymentInputSchema,
+  requireSessionScope,
+  assertNoCallerAuthority,
+  type SessionContext,
+  type SessionScope,
 } from "@agentpay-ai/shared";
 
 import type { AgentPayRuntime } from "../runtime/agentpay-runtime.ts";
 import { prepareAccountAdminTransactionTool } from "../tools/account-admin.ts";
-import { executePaymentTool } from "../tools/execute-payment.ts";
+import { DurableExecutionError, executePaymentTool } from "../tools/execute-payment.ts";
 import { getBalanceTool } from "../tools/get-balance.ts";
 import { parseInvoicePaymentTool } from "../tools/invoice.ts";
 import { prepareX402ServiceRequestTool, searchX402ServicesTool } from "../tools/x402-bazaar.ts";
@@ -30,6 +36,7 @@ import { parseX402PaymentRequiredTool, retryX402RequestTool } from "../tools/x40
 import { listPaymentEventsTool, listTransactionsTool, trackPaymentTool } from "../tools/payment-tracking.ts";
 import { prepareContractCallTool } from "../tools/prepare-contract-call.ts";
 import { preparePaymentTool } from "../tools/prepare-payment.ts";
+import { getPaymentSignatureTool } from "../tools/payment-review.ts";
 import { quotePaymentRouteTool } from "../tools/quote-payment-route.ts";
 import {
   checkRouteTargetAllowanceTool,
@@ -55,7 +62,24 @@ export interface AgentPayMcpToolResult {
   isError?: boolean;
 }
 
-export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: AgentPayRuntime): void {
+export interface AgentPayMcpRegistrationOptions {
+  sessionContext?: SessionContext;
+  /** Public paid ASP mode exposes only execute_payment. */
+  publicExecutionOnly?: boolean;
+  /** Explicit local/migration escape hatch. Production/public registration leaves this off. */
+  legacyApprovalEnabled?: boolean;
+}
+
+export function registerAgentPayMcpTools(
+  server: AgentPayMcpServer,
+  runtime: AgentPayRuntime,
+  options: AgentPayMcpRegistrationOptions = {},
+): void {
+  if (options.publicExecutionOnly) {
+    registerExecutePaymentTool(server, runtime, options);
+    return;
+  }
+
   server.registerTool(
     prepareWalletCreationTool.name,
     {
@@ -63,7 +87,14 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: prepareWalletCreationTool.description,
       inputSchema: prepareWalletCreationInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.prepareWalletCreation(prepareWalletCreationInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "session:manage", async (input) =>
+      toMcpResult(
+        await runtime.prepareWalletCreation({
+          ...prepareWalletCreationInputSchema.parse(input),
+          ...(options.sessionContext ? { ownerAddress: options.sessionContext.ownerAddress } : {}),
+        }),
+      ),
+    ),
   );
 
   server.registerTool(
@@ -73,7 +104,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: checkWalletCreationTool.description,
       inputSchema: checkWalletCreationInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.checkWalletCreation(checkWalletCreationInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "wallet:read", async (input) =>
+      toMcpResult(await runtime.checkWalletCreation(checkWalletCreationInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -83,7 +116,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: getAgentWalletTool.description,
       inputSchema: getAgentWalletInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.getAgentWallet(getAgentWalletInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "wallet:read", async (input) =>
+      toMcpResult(await runtime.getAgentWallet(getAgentWalletInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -93,7 +128,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: getBalanceTool.description,
       inputSchema: getBalanceInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.getBalance(getBalanceInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "wallet:read", async (input) =>
+      toMcpResult(await runtime.getBalance(getBalanceInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -123,8 +160,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: prepareX402ServiceRequestTool.description,
       inputSchema: prepareX402ServiceRequestInputSchema.shape,
     },
-    async (input) =>
+    guardedTool(options.sessionContext, "payment:prepare", async (input) =>
       toMcpResult(await runtime.prepareX402ServiceRequest(prepareX402ServiceRequestInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -145,7 +183,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: retryX402RequestTool.description,
       inputSchema: retryX402RequestInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.retryX402Request(retryX402RequestInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:read", async (input) =>
+      toMcpResult(await runtime.retryX402Request(retryX402RequestInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -155,7 +195,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: prepareContractCallTool.description,
       inputSchema: prepareContractCallInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.prepareContractCall(prepareContractCallInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:prepare", async (input) =>
+      toMcpResult(await runtime.prepareContractCall(prepareContractCallInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -165,7 +207,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: quotePaymentRouteTool.description,
       inputSchema: quotePaymentRouteInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.quotePaymentRoute(quotePaymentRouteInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:prepare", async (input) =>
+      toMcpResult(await runtime.quotePaymentRoute(quotePaymentRouteInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -175,8 +219,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: checkRouteTargetAllowanceTool.description,
       inputSchema: checkRouteTargetAllowanceInputSchema.shape,
     },
-    async (input) =>
+    guardedTool(options.sessionContext, "payment:read", async (input) =>
       toMcpResult(await runtime.checkRouteTargetAllowance(checkRouteTargetAllowanceInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -186,8 +231,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: prepareRouteTargetAllowanceTool.description,
       inputSchema: prepareRouteTargetAllowanceInputSchema.shape,
     },
-    async (input) =>
+    guardedTool(options.sessionContext, "payment:prepare", async (input) =>
       toMcpResult(await runtime.prepareRouteTargetAllowance(prepareRouteTargetAllowanceInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -197,10 +243,11 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: prepareAccountAdminTransactionTool.description,
       inputSchema: prepareAccountAdminTransactionInputSchema,
     },
-    async (input) =>
+    guardedTool(options.sessionContext, "payment:review", async (input) =>
       toMcpResult(
         await runtime.prepareAccountAdminTransaction(prepareAccountAdminTransactionInputSchema.parse(input)),
       ),
+    ),
   );
 
   server.registerTool(
@@ -210,24 +257,26 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: preparePaymentTool.description,
       inputSchema: preparePaymentInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.preparePayment(preparePaymentInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:prepare", async (input) =>
+      toMcpResult(await runtime.preparePayment(preparePaymentInputSchema.parse(input))),
+    ),
   );
 
-  server.registerTool(
-    executePaymentTool.name,
-    {
-      title: "Execute Payment",
-      description: executePaymentTool.description,
-      inputSchema: executePaymentInputSchema.shape,
-    },
-    async (input) => {
-      try {
-        return toMcpResult(await runtime.executePayment(executePaymentInputSchema.parse(input)));
-      } catch (error) {
-        return toMcpErrorResult(error);
-      }
-    },
-  );
+  if (options.sessionContext) {
+    server.registerTool(
+      getPaymentSignatureTool.name,
+      {
+        title: "Get Payment Signature",
+        description: getPaymentSignatureTool.description,
+        inputSchema: getPaymentSignatureInputSchema.shape,
+      },
+      guardedTool(options.sessionContext, "payment:review", async (input) =>
+        toMcpResult(await runtime.getPaymentSignature(getPaymentSignatureInputSchema.parse(input))),
+      ),
+    );
+  }
+
+  registerExecutePaymentTool(server, runtime, options);
 
   server.registerTool(
     trackPaymentTool.name,
@@ -236,7 +285,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: trackPaymentTool.description,
       inputSchema: trackPaymentInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.trackPayment(trackPaymentInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:read", async (input) =>
+      toMcpResult(await runtime.trackPayment(trackPaymentInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -246,7 +297,9 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: listTransactionsTool.description,
       inputSchema: listTransactionsInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.listTransactions(listTransactionsInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:read", async (input) =>
+      toMcpResult(await runtime.listTransactions(listTransactionsInputSchema.parse(input))),
+    ),
   );
 
   server.registerTool(
@@ -256,8 +309,67 @@ export function registerAgentPayMcpTools(server: AgentPayMcpServer, runtime: Age
       description: listPaymentEventsTool.description,
       inputSchema: listPaymentEventsInputSchema.shape,
     },
-    async (input) => toMcpResult(await runtime.listPaymentEvents(listPaymentEventsInputSchema.parse(input))),
+    guardedTool(options.sessionContext, "payment:read", async (input) =>
+      toMcpResult(await runtime.listPaymentEvents(listPaymentEventsInputSchema.parse(input))),
+    ),
   );
+}
+
+function registerExecutePaymentTool(
+  server: AgentPayMcpServer,
+  runtime: AgentPayRuntime,
+  options: AgentPayMcpRegistrationOptions,
+): void {
+  server.registerTool(
+    executePaymentTool.name,
+    {
+      title: "Execute Payment",
+      description: executePaymentTool.description,
+      inputSchema: executePaymentInputSchema.shape,
+    },
+    async (input) => {
+      if (options.sessionContext) {
+        try {
+          assertNoCallerAuthority(input);
+        } catch (error) {
+          return toMcpErrorResult(error);
+        }
+        return toMcpErrorResult(
+          new AgentPayAuthError(
+            "AUTH_PAYMENT_SIGNATURE_REQUIRED",
+            "Consumer session cannot authorize payment execution; hand the owner-signed authorization to the public paid ASP.",
+          ),
+        );
+      }
+      if (!executePaymentInputSchema.safeParse(input).data?.signature && !options.legacyApprovalEnabled) {
+        return toMcpErrorResult(
+          new AgentPayAuthError(
+            "AUTH_PAYMENT_SIGNATURE_REQUIRED",
+            "Owner EIP-712 payment authorization is required; legacy approval text is disabled on this surface.",
+          ),
+        );
+      }
+      try {
+        return toMcpResult(await runtime.executePayment(executePaymentInputSchema.parse(input)));
+      } catch (error) {
+        return toMcpErrorResult(error);
+      }
+    },
+  );
+}
+
+function guardedTool(
+  context: SessionContext | undefined,
+  requiredScope: SessionScope,
+  handler: (input: unknown) => Promise<AgentPayMcpToolResult>,
+): (input: unknown) => Promise<AgentPayMcpToolResult> {
+  return async (input) => {
+    if (context) {
+      assertNoCallerAuthority(input);
+      requireSessionScope(context, requiredScope);
+    }
+    return handler(input);
+  };
 }
 
 function toMcpResult(output: unknown): AgentPayMcpToolResult {
@@ -273,11 +385,16 @@ function toMcpResult(output: unknown): AgentPayMcpToolResult {
 }
 
 function toMcpErrorResult(error: unknown): AgentPayMcpToolResult {
+  const text = error instanceof DurableExecutionError
+    ? `${error.code}: ${error.message}`
+    : error instanceof Error
+      ? error.message
+      : "Unknown AgentPay tool failure.";
   return {
     content: [
       {
         type: "text",
-        text: error instanceof Error ? error.message : "Unknown AgentPay tool failure.",
+        text,
       },
     ],
     isError: true,

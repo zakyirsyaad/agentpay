@@ -48,6 +48,7 @@ describe("exportAgentPayAccountBytecode", () => {
         artifactPath,
         outputPath,
         bytecodeBytes: 4,
+        bytecodeHash: "0x5e3ce470a8506d55e59815db7232a08774174ae0c7fdb2fbc81a49e4e242b0d6",
       });
       assert.equal(await readFile(outputPath, "utf8"), "0x60006000\n");
     } finally {

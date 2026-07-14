@@ -24,8 +24,11 @@ contract DeployAgentPayAccount {
 
     event AgentPayAccountDeployed(address indexed account, address indexed owner, address indexed executor);
     error UnsupportedDeployChain(uint256 chainId);
+    error LegacyMainnetDeploymentDisabled();
 
     function run() external returns (AgentPayAccount account) {
+        if (block.chainid == XLAYER_CHAIN_ID) revert LegacyMainnetDeploymentDisabled();
+
         uint256 deployerPrivateKey = vm.envUint("SETUP_DEPLOYER_PRIVATE_KEY");
         address owner = vm.envAddress("AGENTPAY_OWNER_ADDRESS");
         address executor = vm.envAddress("AGENTPAY_EXECUTOR_ADDRESS");

@@ -1,9 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { keccak_256 } from "@noble/hashes/sha3.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 const defaultArtifactPath = fileURLToPath(
-  new URL("../contracts/out/AgentPayAccount.sol/AgentPayAccount.json", import.meta.url),
+  new URL("../contracts/out/AgentPayAccountV2.sol/AgentPayAccountV2.json", import.meta.url),
 );
 const defaultOutputPath = fileURLToPath(new URL("../packages/cli/assets/AgentPayAccount.bin", import.meta.url));
 
@@ -11,11 +13,13 @@ export function extractAgentPayAccountBytecode(artifact) {
   const bytecode = artifact?.bytecode?.object;
 
   if (typeof bytecode !== "string" || !/^0x(?:[a-fA-F0-9]{2})+$/.test(bytecode)) {
-    throw new Error("Foundry artifact is missing valid AgentPayAccount deploy bytecode.");
+    throw new Error("Foundry artifact is missing valid AgentPayAccountV2 deploy bytecode.");
   }
 
   return bytecode;
 }
+
+export const extractAgentPayAccountV2Bytecode = extractAgentPayAccountBytecode;
 
 export async function exportAgentPayAccountBytecode(options = {}) {
   const artifactPath = options.artifactPath ?? defaultArtifactPath;
@@ -30,6 +34,7 @@ export async function exportAgentPayAccountBytecode(options = {}) {
     artifactPath,
     outputPath,
     bytecodeBytes: (bytecode.length - 2) / 2,
+    bytecodeHash: `0x${bytesToHex(keccak_256(hexToBytes(bytecode.slice(2))))}`,
   };
 }
 
@@ -65,7 +70,7 @@ function requireValue(value, optionName) {
 
 function helpText() {
   return [
-    "Export AgentPayAccount deploy bytecode from the Foundry artifact for packaged setup-web installs.",
+    "Export AgentPayAccountV2 deploy bytecode from the Foundry artifact for packaged setup-web installs.",
     "",
     "Usage:",
     "  node scripts/export-agentpay-bytecode.mjs [--artifact path] [--out path]",

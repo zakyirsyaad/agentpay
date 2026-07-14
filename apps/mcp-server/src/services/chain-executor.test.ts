@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AbiCoder } from "ethers";
+import { AbiCoder, keccak256 } from "ethers";
 
 import {
   agentPayAccountInterface,
+  agentPayAccountV2Interface,
+  assertExecutorRpcChain,
   createEthersNativeBalanceReader,
+  createEthersAuthorizedPaymentExecutor,
   createEthersRouteTargetAllowanceChecker,
   createEthersRoutePaymentExecutor,
   createEthersSourceTransactionStatusProvider,
@@ -13,6 +16,22 @@ import {
   erc20Interface,
   resolveRpcUrlForChain,
 } from "./chain-executor.ts";
+import { createInMemoryInvoiceExecutionOutboxStore } from "./paid-execution-outbox.ts";
+import type { PaidExecutionLifecycleStore } from "./paid-execution-lifecycle.ts";
+
+const directAuthorization = {
+  intentIdHash: `0x${"11".repeat(32)}`,
+  tenantIdHash: `0x${"22".repeat(32)}`,
+  paymentType: `0x${"33".repeat(32)}`,
+  owner: "0x2222222222222222222222222222222222222222",
+  account: "0x3333333333333333333333333333333333333333",
+  tokenAddress: "0x5555555555555555555555555555555555555555",
+  recipient: "0x1111111111111111111111111111111111111111",
+  amount: "10000000",
+  nonce: "42",
+  deadline: "1783003500",
+  purposeHash: `0x${"44".repeat(32)}`,
+};
 
 describe("createEthersRoutePaymentExecutor", () => {
   it("encodes executeRoutePayment and submits it to the stored account address", async () => {
@@ -152,6 +171,185 @@ describe("createEthersRoutePaymentExecutor", () => {
     assert.equal(intent.nonce, 44n);
     assert.equal(intent.deadline, 1783003500n);
     assert.equal(parsed?.args[1], "0xaabbccdd");
+  });
+});
+
+describe("createEthersAuthorizedPaymentExecutor", () => {
+  it("encodes a V2 direct authorization and owner signature without changing fields", async () => {
+    const transactions: Array<{ to: string; data: string; value: bigint; chainId?: number }> = [];
+    const executor = createEthersAuthorizedPaymentExecutor({
+      async sendTransaction(transaction, chainId) {
+        transactions.push({ ...transaction, chainId });
+        return { hash: `0x${"aa".repeat(32)}` };
+      },
+    });
+    const signature = `0x${"55".repeat(65)}`;
+
+    const result = await executor.executeAuthorizedDirectPayment({
+      accountAddress: directAuthorization.account,
+      chainId: 196,
+      authorization: directAuthorization,
+      signature,
+    });
+
+    assert.equal(result.sourceTxHash, `0x${"aa".repeat(32)}`);
+    assert.equal(transactions[0]?.value, 0n);
+    assert.equal(transactions[0]?.chainId, 196);
+    const parsed = agentPayAccountV2Interface.parseTransaction({ data: transactions[0].data });
+    assert.equal(parsed?.name, "executeAuthorizedDirectPayment");
+    assert.equal(parsed?.args[0].intentIdHash, directAuthorization.intentIdHash);
+    assert.equal(parsed?.args[0].amount, 10000000n);
+    assert.equal(parsed?.args[0].nonce, 42n);
+    assert.equal(parsed?.args[1], signature);
+  });
+
+  it("encodes a V2 route authorization and uses only its signed native fee cap", async () => {
+    const transactions: Array<{ to: string; data: string; value: bigint; chainId?: number }> = [];
+    const executor = createEthersAuthorizedPaymentExecutor({
+      async sendTransaction(transaction, chainId) {
+        transactions.push({ ...transaction, chainId });
+        return { hash: `0x${"bb".repeat(32)}` };
+      },
+    });
+    const routeAuthorization = {
+      ...directAuthorization,
+      sourceToken: directAuthorization.tokenAddress,
+      maxAmountIn: "10180000",
+      destinationChainId: "8453",
+      destinationToken: "0x6666666666666666666666666666666666666666",
+      minAmountOut: "10000000",
+      routeTarget: "0x7777777777777777777777777777777777777777",
+      routeCalldataHash: `0x${"66".repeat(32)}`,
+      maxNativeFee: "250000000000000",
+      nativeValue: "100000000000000",
+    };
+
+    await executor.executeAuthorizedRoutePayment({
+      accountAddress: routeAuthorization.account,
+      sourceChainId: 196,
+      authorization: routeAuthorization,
+      routeCalldata: "0x1234",
+      nativeValue: "100000000000000",
+      signature: `0x${"77".repeat(65)}`,
+    });
+
+    assert.equal(transactions[0]?.value, 100000000000000n);
+    assert.equal(transactions[0]?.chainId, 196);
+    const parsed = agentPayAccountV2Interface.parseTransaction({ data: transactions[0].data });
+    assert.equal(parsed?.name, "executeAuthorizedRoutePayment");
+    assert.equal(parsed?.args[0].destinationChainId, 8453n);
+    assert.equal(parsed?.args[0].minAmountOut, 10000000n);
+    assert.equal(parsed?.args[1], "0x1234");
+  });
+
+  it("persists the signed transaction before broadcasting a durable paid execution", async () => {
+    const events: string[] = [];
+    const outbox = createInMemoryInvoiceExecutionOutboxStore(() => "fence_1");
+    const lifecycle = { markExecutionBroadcasted: async () => undefined } as unknown as PaidExecutionLifecycleStore;
+    const executorAddress = "0x9999999999999999999999999999999999999999";
+    const executor = createEthersAuthorizedPaymentExecutor({
+      async sendTransaction() {
+        throw new Error("durable path must not call Wallet.sendTransaction");
+      },
+      async prepareAndSignTransaction(transaction) {
+        const record = await outbox.get("outbox_lifecycle_1");
+        assert.equal(record?.status, "QUEUED");
+        events.push("prepared");
+        const rawTransaction = "0xdeadbeef";
+        return {
+          rawTransaction,
+          transactionHash: keccak256(rawTransaction),
+          executorNonce: "9",
+          chainId: 196,
+          from: executorAddress,
+          to: transaction.to,
+          data: transaction.data,
+          value: String(transaction.value),
+        };
+      },
+      async broadcastSignedTransaction() {
+        const record = await outbox.get("outbox_lifecycle_1");
+        assert.equal(record?.status, "BROADCAST_UNKNOWN");
+        events.push("broadcast");
+        return { hash: keccak256("0xdeadbeef") };
+      },
+    });
+
+    const result = await executor.executeAuthorizedDirectPayment({
+      accountAddress: directAuthorization.account,
+      chainId: 196,
+      authorization: directAuthorization,
+      signature: `0x${"55".repeat(65)}`,
+      durableExecution: {
+        lifecycleId: "lifecycle_1",
+        outboxId: "outbox_lifecycle_1",
+        tenantId: "tenant_1",
+        paymentIntentId: "pay_1",
+        executorAddress,
+        ownerAuthorizationNonce: directAuthorization.nonce,
+        rawTxEncryptionKey: "a".repeat(64),
+        outbox,
+        lifecycle,
+        now: (() => "2026-07-13T00:00:00.000Z"),
+      },
+    });
+
+    assert.equal(result.sourceTxHash, keccak256("0xdeadbeef"));
+    assert.deepEqual(events, ["prepared", "broadcast"]);
+    const record = await outbox.get("outbox_lifecycle_1");
+    assert.equal(record?.status, "BROADCASTED");
+    assert.equal(record?.transactionHash, keccak256("0xdeadbeef"));
+    assert.ok(record?.rawTransaction);
+  });
+
+  it("marks a durable outbox broadcast as unknown when the RPC response fails", async () => {
+    const outbox = createInMemoryInvoiceExecutionOutboxStore(() => "fence_2");
+    const lifecycle = { markExecutionBroadcasted: async () => undefined } as unknown as PaidExecutionLifecycleStore;
+    const executorAddress = "0x9999999999999999999999999999999999999999";
+    const executor = createEthersAuthorizedPaymentExecutor({
+      async sendTransaction() {
+        throw new Error("durable path must not call Wallet.sendTransaction");
+      },
+      async prepareAndSignTransaction(transaction) {
+        const rawTransaction = "0xbeefdead";
+        return {
+          rawTransaction,
+          transactionHash: keccak256(rawTransaction),
+          executorNonce: "10",
+          chainId: 196,
+          from: executorAddress,
+          to: transaction.to,
+          data: transaction.data,
+          value: String(transaction.value),
+        };
+      },
+      async broadcastSignedTransaction() {
+        throw new Error("RPC connection lost after submission");
+      },
+    });
+
+    await assert.rejects(
+      () => executor.executeAuthorizedDirectPayment({
+        accountAddress: directAuthorization.account,
+        chainId: 196,
+        authorization: directAuthorization,
+        signature: `0x${"55".repeat(65)}`,
+        durableExecution: {
+          lifecycleId: "lifecycle_2",
+          outboxId: "outbox_lifecycle_2",
+          tenantId: "tenant_1",
+          paymentIntentId: "pay_2",
+          executorAddress,
+          ownerAuthorizationNonce: directAuthorization.nonce,
+          rawTxEncryptionKey: "b".repeat(64),
+          outbox,
+          lifecycle,
+          now: (() => "2026-07-13T00:00:00.000Z"),
+        },
+      }),
+      /RPC connection lost/i,
+    );
+    assert.equal((await outbox.get("outbox_lifecycle_2"))?.status, "BROADCAST_UNKNOWN");
   });
 });
 
@@ -334,5 +532,12 @@ describe("resolveRpcUrlForChain", () => {
     assert.equal(resolveRpcUrlForChain(config, 1952), "https://testnet.xlayer.example");
     assert.equal(resolveRpcUrlForChain(config, 8453), "https://fallback.xlayer.example");
     assert.equal(resolveRpcUrlForChain({ rpcUrl: "https://fallback.xlayer.example" }, 1952), "https://fallback.xlayer.example");
+  });
+});
+
+describe("assertExecutorRpcChain", () => {
+  it("fails closed when an executor RPC resolves to another chain", () => {
+    assert.doesNotThrow(() => assertExecutorRpcChain(196, 196));
+    assert.throws(() => assertExecutorRpcChain(196, 1952), /chain mismatch/);
   });
 });

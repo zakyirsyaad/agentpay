@@ -59,10 +59,20 @@ export type ParsedPreparePaymentInput = z.output<typeof preparePaymentInputSchem
 
 export const executePaymentInputSchema = z.object({
   paymentIntentId: z.string().trim().min(1),
-  approvalText: z.string().min(1),
+  approvalText: z.string().min(1).optional(),
+  signature: z.string().regex(/^0x[a-fA-F0-9]{130}$/, "Expected an EVM payment authorization signature").optional(),
+}).refine((value) => Boolean(value.approvalText || value.signature), {
+  message: "Provide an owner payment signature or the legacy approval text.",
 });
 
 export type ExecutePaymentInput = z.infer<typeof executePaymentInputSchema>;
+
+export const executeAuthorizedPaymentInputSchema = z.object({
+  paymentIntentId: z.string().trim().min(1),
+  signature: z.string().regex(/^0x[a-fA-F0-9]{130}$/, "Expected an EVM payment authorization signature"),
+});
+
+export type ExecuteAuthorizedPaymentInput = z.infer<typeof executeAuthorizedPaymentInputSchema>;
 
 export const prepareContractCallInputSchema = z.object({
   targetAddress: evmAddressSchema,
@@ -90,10 +100,12 @@ export interface RouteQuote {
   destinationTokenAddress: string;
   maxAmountIn: string;
   maxNativeFee: string;
+  nativeValue?: string;
   routeTarget: string;
   routeCalldata: string;
   routeCalldataHash: string;
   routeSummary: string;
+  minAmountOut?: string;
   estimatedFee?: string;
   estimatedEtaSeconds?: number;
 }
@@ -132,6 +144,7 @@ export function createDirectPaymentRouteQuote(request: {
 
 export interface PaymentIntentRecord {
   id: string;
+  tenantId?: string;
   accountAddress: string;
   ownerAddress: string;
   status: PaymentIntentStatus;
@@ -144,6 +157,8 @@ export interface PaymentIntentRecord {
   destinationTokenSymbol: string;
   recipientAddress: string;
   amountOut: string;
+  minAmountOut?: string;
+  nativeValue?: string;
   maxAmountIn: string;
   maxNativeFee: string;
   routeProvider: RouteProvider;

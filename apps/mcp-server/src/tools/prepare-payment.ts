@@ -12,10 +12,22 @@ import {
   type RouteProvider,
   type RouteQuote,
 } from "@agentpay-ai/shared";
+import {
+  createPaymentAuthorizationFromIntent,
+  hashPaymentAuthorization,
+  type PaymentAuthorizationTypedData,
+} from "../services/payment-authorization.ts";
+import {
+  createPaymentReviewToken,
+  createPaymentReviewUrl,
+  hashPaymentReviewToken,
+  type PaymentReviewRepository,
+} from "../services/payment-review.ts";
 
 import type { TokenBalanceChecker } from "./execute-payment.ts";
 
 export interface AgentWallet {
+  tenantId?: string;
   ownerAddress: string;
   accountAddress: string;
   homeChainId: number;
@@ -45,6 +57,7 @@ export interface RouteQuoteProvider {
 
 export interface PaymentIntentRepository {
   createPaymentIntent(intent: PaymentIntentRecord): Promise<void>;
+  markPaymentFailed?(paymentIntentId: string, errorCode: string, errorMessage: string): Promise<void>;
 }
 
 export interface PreparePaymentDependencies {
@@ -57,6 +70,11 @@ export interface PreparePaymentDependencies {
   createNonce: () => string;
   homeChainId?: number;
   approvalTtlSeconds?: number;
+  tenantId?: string;
+  setupWebUrl?: string;
+  reviewTokenSecret?: string;
+  paymentReviews?: PaymentReviewRepository;
+  createReviewToken?: () => string;
 }
 
 export interface PreparePaymentOutput {
@@ -79,8 +97,13 @@ export interface PreparePaymentOutput {
     purpose: string;
     maxNativeFee: string;
     maxNativeFeeDisplay: string;
+    minAmountOut?: string;
+    nativeValue?: string;
   };
   instructionToAgent: string;
+  reviewUrl?: string;
+  authorization?: PaymentAuthorizationTypedData;
+  authorizationHash?: string;
 }
 
 export async function preparePayment(
@@ -94,6 +117,9 @@ export async function preparePayment(
 
   if (!wallet || wallet.status !== "ACTIVE") {
     throw new Error("No active AgentPay wallet is available.");
+  }
+  if (dependencies.tenantId && dependencies.setupWebUrl && !dependencies.paymentReviews) {
+    throw new Error("Payment Review & Sign handoff is not configured for this consumer runtime.");
   }
 
   const quote = isDirectPaymentRoute(
@@ -129,11 +155,15 @@ export async function preparePayment(
 
   const paymentIntentId = dependencies.createId();
   const approvalPhrase = createApprovalPhrase(paymentIntentId);
-  const approvalTtlSeconds = dependencies.approvalTtlSeconds ?? 900;
+  const approvalTtlSeconds = Math.min(
+    dependencies.approvalTtlSeconds ?? 900,
+    quote.routeProvider === "DIRECT" ? 900 : 300,
+  );
   const deadline = new Date(dependencies.clock().getTime() + approvalTtlSeconds * 1000).toISOString();
 
   const intent: PaymentIntentRecord = {
     id: paymentIntentId,
+    ...(dependencies.tenantId ? { tenantId: dependencies.tenantId } : {}),
     accountAddress: wallet.accountAddress,
     ownerAddress: wallet.ownerAddress,
     status: "AWAITING_APPROVAL",
@@ -146,8 +176,10 @@ export async function preparePayment(
     destinationTokenSymbol: input.destinationTokenSymbol,
     recipientAddress: input.recipientAddress,
     amountOut: input.amountOut,
+    ...(quote.minAmountOut ? { minAmountOut: quote.minAmountOut } : {}),
     maxAmountIn: quote.maxAmountIn,
     maxNativeFee: quote.maxNativeFee,
+    ...(quote.nativeValue ? { nativeValue: quote.nativeValue } : {}),
     routeProvider: quote.routeProvider,
     routeTarget: quote.routeTarget,
     routeCalldata: quote.routeCalldata,
@@ -161,7 +193,50 @@ export async function preparePayment(
     approvalPhrase,
   };
 
+  const authorization = dependencies.tenantId
+    ? createPaymentAuthorizationFromIntent(intent, dependencies.tenantId)
+    : undefined;
+  const reviewToken = authorization && dependencies.tenantId && dependencies.setupWebUrl && dependencies.paymentReviews
+    ? (dependencies.createReviewToken ?? (() => createPaymentReviewToken()))()
+    : undefined;
+  const reviewUrl = reviewToken && dependencies.setupWebUrl
+    ? createPaymentReviewUrl(dependencies.setupWebUrl, reviewToken)
+    : undefined;
+  const reviewHandoff = reviewToken && dependencies.tenantId && authorization
+    ? {
+        id: `review_${paymentIntentId}`,
+        paymentIntentId,
+        tenantId: dependencies.tenantId,
+        ownerAddress: intent.ownerAddress,
+        accountAddress: intent.accountAddress,
+        sourceChainId: intent.sourceChainId,
+        authorizationHash: hashPaymentAuthorization(authorization),
+        tokenDigest: hashPaymentReviewToken(reviewToken, dependencies.reviewTokenSecret),
+        status: "PENDING" as const,
+        createdAt: dependencies.clock().toISOString(),
+        expiresAt: deadline,
+      }
+    : undefined;
+
   await dependencies.paymentIntents.createPaymentIntent(intent);
+  if (reviewHandoff && dependencies.paymentReviews) {
+    try {
+      await dependencies.paymentReviews.createPaymentReviewHandoff(reviewHandoff);
+    } catch (error) {
+      await dependencies.paymentIntents.markPaymentFailed?.(
+        paymentIntentId,
+        "REVIEW_HANDOFF_FAILED",
+        "Payment Review & Sign handoff could not be persisted.",
+      );
+      throw error;
+    }
+  }
+
+  const instructionToAgent = reviewUrl
+    ? `Open Review & Sign at ${reviewUrl}, then call get_payment_signature and hand the owner signature to the public paid execute_payment ASP.`
+    : authorization
+      ? "Open Review & Sign for the returned EIP-712 authorization, then hand the owner signature to the public paid execute_payment ASP."
+    : createApprovalInstruction(paymentIntentId);
 
   return {
     paymentIntentId,
@@ -183,14 +258,24 @@ export async function preparePayment(
       purpose: input.purpose,
       maxNativeFee: quote.maxNativeFee,
       maxNativeFeeDisplay: formatNativeAmount(quote.maxNativeFee, wallet.homeChainId),
+      ...(quote.minAmountOut ? { minAmountOut: quote.minAmountOut } : {}),
+      ...(quote.nativeValue ? { nativeValue: quote.nativeValue } : {}),
     },
-    instructionToAgent: createApprovalInstruction(paymentIntentId),
+    instructionToAgent,
+    ...(reviewUrl ? { reviewUrl } : {}),
+    ...(authorization
+      ? {
+          authorization,
+          authorizationHash: hashPaymentAuthorization(authorization),
+        }
+      : {}),
   };
 }
 
 export const preparePaymentTool = {
   name: "prepare_payment",
-  description: "Prepare an AgentPay payment intent and return the exact approval phrase.",
+  description:
+    "Prepare an AgentPay payment intent. Trusted consumer sessions receive canonical owner EIP-712 typed data for Review & Sign; the legacy approval phrase is migration-only.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

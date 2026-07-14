@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { createSessionContext } from "@agentpay-ai/shared";
 import type { AgentPayRuntime } from "../runtime/agentpay-runtime.ts";
 import { registerAgentPayMcpTools, type AgentPayMcpServer } from "./agentpay-mcp.ts";
 
@@ -169,7 +170,7 @@ describe("registerAgentPayMcpTools", () => {
           },
           missingParameters: [],
           instructionToAgent:
-            "Call parse_x402_payment_required with paymentRequired, then run exact approval before retry_x402_request.",
+            "Call parse_x402_payment_required with paymentRequired, then run the Review & Sign owner-authorization flow before retry_x402_request.",
         };
       },
     });
@@ -370,7 +371,7 @@ describe("registerAgentPayMcpTools", () => {
           },
           standardX402SignatureRequired: true,
           instructionToAgent:
-            "Review the x402 requirement with the user. Prepare payment with paymentInput, preserve paymentType: X402_PAYMENT, execute only after exact approval, track until COMPLETED, then call retry_x402_request with the original PAYMENT-REQUIRED response and paymentIntentId.",
+            "Review the x402 requirement with the user. Prepare payment with paymentInput, preserve paymentType: X402_PAYMENT, send the owner to Review & Sign for the EIP-712 authorization, execute with the verified signature, track until COMPLETED, then call retry_x402_request with the original PAYMENT-REQUIRED response and paymentIntentId.",
         };
       },
     });
@@ -434,7 +435,7 @@ describe("registerAgentPayMcpTools", () => {
       },
       standardX402SignatureRequired: true,
       instructionToAgent:
-        "Review the x402 requirement with the user. Prepare payment with paymentInput, preserve paymentType: X402_PAYMENT, execute only after exact approval, track until COMPLETED, then call retry_x402_request with the original PAYMENT-REQUIRED response and paymentIntentId.",
+        "Review the x402 requirement with the user. Prepare payment with paymentInput, preserve paymentType: X402_PAYMENT, send the owner to Review & Sign for the EIP-712 authorization, execute with the verified signature, track until COMPLETED, then call retry_x402_request with the original PAYMENT-REQUIRED response and paymentIntentId.",
     });
   });
 
@@ -913,7 +914,7 @@ describe("registerAgentPayMcpTools", () => {
       },
     });
 
-    registerAgentPayMcpTools(server, runtime);
+    registerAgentPayMcpTools(server, runtime, { legacyApprovalEnabled: true });
     const registered = server.tools.get("execute_payment");
 
     assert.ok(registered);
@@ -933,6 +934,23 @@ describe("registerAgentPayMcpTools", () => {
       ],
       isError: true,
     });
+  });
+
+  it("rejects legacy approval text on the public execution surface", async () => {
+    const server = new FakeMcpServer();
+    const runtime = createRuntime({});
+
+    registerAgentPayMcpTools(server, runtime);
+    const registered = server.tools.get("execute_payment");
+
+    assert.ok(registered);
+    const result = await registered.handler({
+      paymentIntentId: "pay_public",
+      approvalText: "APPROVE pay_public",
+    });
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.match(JSON.stringify(result), /EIP-712 payment authorization is required/i);
   });
 
   it("registers track_payment, list_transactions, and list_payment_events", async () => {
@@ -1025,6 +1043,125 @@ describe("registerAgentPayMcpTools", () => {
       ],
     });
   });
+
+  it("enforces session scopes and never treats a consumer session as payment authorization", async () => {
+    const server = new FakeMcpServer();
+    const runtime = createRuntime({});
+    const sessionContext = createSessionContext({
+      sessionId: "session_123",
+      tenantId: "tenant_a",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      homeChainId: 1952,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["payment:read"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    });
+
+    registerAgentPayMcpTools(server, runtime, { sessionContext });
+    const balance = server.tools.get("get_balance");
+    const execute = server.tools.get("execute_payment");
+    const executeAuthorized = server.tools.get("execute_authorized_payment");
+    const getSignature = server.tools.get("get_payment_signature");
+    assert.ok(balance);
+    assert.ok(execute);
+    assert.equal(executeAuthorized, undefined);
+    assert.ok(getSignature);
+
+    await assert.rejects(balance.handler({}), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "AUTH_SCOPE_REQUIRED");
+      return true;
+    });
+    await assert.rejects(
+      balance.handler({ accountAddress: "0x9999999999999999999999999999999999999999" }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "CALLER_AUTHORITY_FORBIDDEN");
+        return true;
+      },
+    );
+    const executionResult = await execute.handler({ paymentIntentId: "pay_123", approvalText: "ignored" });
+    assert.equal((executionResult as { isError?: boolean }).isError, true);
+    assert.match(JSON.stringify(executionResult), /public paid ASP/i);
+    await assert.rejects(getSignature.handler({ paymentIntentId: "pay_123" }), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "AUTH_SCOPE_REQUIRED");
+      return true;
+    });
+  });
+
+  it("returns a tenant-scoped signature only with the payment:review scope", async () => {
+    const server = new FakeMcpServer();
+    const sessionContext = createSessionContext({
+      sessionId: "session_review",
+      tenantId: "tenant_a",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      homeChainId: 1952,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["payment:review"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    });
+    const runtime = createRuntime({
+      async getPaymentSignature(input) {
+        assert.deepEqual(input, { paymentIntentId: "pay_review" });
+        return {
+          paymentIntentId: "pay_review",
+          status: "SIGNED",
+          authorizationHash: `0x${"a".repeat(64)}`,
+          signature: `0x${"b".repeat(130)}`,
+        };
+      },
+    });
+
+    registerAgentPayMcpTools(server, runtime, { sessionContext });
+    const tool = server.tools.get("get_payment_signature");
+    assert.ok(tool);
+    const result = await tool.handler({ paymentIntentId: "pay_review" });
+    assert.equal((result as { structuredContent?: { status?: string } }).structuredContent?.status, "SIGNED");
+  });
+
+  it("derives wallet setup ownership from the trusted session", async () => {
+    const server = new FakeMcpServer();
+    const sessionContext = createSessionContext({
+      sessionId: "session_setup",
+      tenantId: "tenant_setup",
+      ownerAddress: "0x1111111111111111111111111111111111111111",
+      accountAddress: "0x2222222222222222222222222222222222222222",
+      homeChainId: 1952,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["session:manage"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    });
+    let receivedOwner: string | undefined;
+    const runtime = createRuntime({
+      async prepareWalletCreation(input) {
+        receivedOwner = input.ownerAddress;
+        return {
+          setupIntentId: "setup_session",
+          status: "PENDING",
+          setupUrl: "https://wallet.agentpay.site/setup?setup_intent_id=setup_session",
+          messageToSign: "setup",
+          expiresAt: "2026-07-12T00:05:00.000Z",
+          homeChainId: 1952,
+          homeChain: "X Layer testnet",
+        };
+      },
+    });
+
+    registerAgentPayMcpTools(server, runtime, { sessionContext });
+    const result = await server.tools.get("prepare_wallet_creation")?.handler({ network: "testnet" });
+
+    assert.equal(receivedOwner, sessionContext.ownerAddress);
+    assert.equal((result as { structuredContent?: { setupIntentId?: string } }).structuredContent?.setupIntentId, "setup_session");
+  });
 });
 
 function createRuntime(overrides: Partial<AgentPayRuntime>): AgentPayRuntime {
@@ -1065,6 +1202,9 @@ function createRuntime(overrides: Partial<AgentPayRuntime>): AgentPayRuntime {
     async preparePayment() {
       throw new Error("preparePayment was not expected.");
     },
+    async getPaymentSignature() {
+      throw new Error("getPaymentSignature was not expected.");
+    },
     async checkRouteTargetAllowance() {
       throw new Error("checkRouteTargetAllowance was not expected.");
     },
@@ -1076,6 +1216,9 @@ function createRuntime(overrides: Partial<AgentPayRuntime>): AgentPayRuntime {
     },
     async executePayment() {
       throw new Error("executePayment was not expected.");
+    },
+    async executeAuthorizedPayment() {
+      throw new Error("executeAuthorizedPayment was not expected.");
     },
     async trackPayment() {
       throw new Error("trackPayment was not expected.");

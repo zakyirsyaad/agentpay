@@ -13,8 +13,10 @@ import {
   runAgentPayDoctor,
   runAgentPayCli,
 } from "./index.ts";
+import { AGENT_PAY_ACCOUNT_V2_REQUIRED_SELECTORS } from "@agentpay-ai/setup-web";
 
 const cliFixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const v2TestBytecode = `0x${AGENT_PAY_ACCOUNT_V2_REQUIRED_SELECTORS.map((selector) => selector.slice(2)).join("")}`;
 
 describe("parseCliArgs", () => {
   it("parses install runtime, output directory, and force flag", () => {
@@ -24,7 +26,7 @@ describe("parseCliArgs", () => {
       outputDir: "/tmp/agentpay",
       force: true,
       selfHosted: false,
-      mcpUrl: "https://mcp.agentpay.site/mcp",
+      mcpUrl: "https://wallet.agentpay.site/mcp",
     });
   });
 
@@ -82,17 +84,17 @@ describe("installAgentPay", () => {
       const skill = await readFile(join(outputDir, "skills", "agentpay", "SKILL.md"), "utf8");
       const skillMetadata = await readFile(join(outputDir, "skills", "agentpay", "agents", "openai.yaml"), "utf8");
 
-      assert.match(skill, /Requires exact chat approval before execution/);
+      assert.match(skill, /Requires a verified owner EIP-712 signature before execution/);
       assert.match(skillMetadata, /display_name: AgentPay/);
       assert.deepEqual(mcpConfig.mcpServers.agentpay, {
-        url: "https://mcp.agentpay.site/mcp",
+        url: "https://wallet.agentpay.site/mcp",
       });
       assert.match(instructions, /return to the agent chat/i);
-      assert.match(instructions, /hosted AgentPay MCP/i);
+      assert.match(instructions, /consumer AgentPay MCP/i);
       assert.doesNotMatch(instructions, /fills? the generated config/i);
       assert.match(instructions, /prepare_wallet_creation/);
       assert.match(instructions, /check_wallet_creation/);
-      assert.match(instructions, /Never call `execute_payment`/);
+      assert.match(instructions, /signature.*execute_payment|execute_payment.*signature/i);
       assert.match(instructions, /call `track_payment`/);
       assert.deepEqual(result.writtenFiles.sort(), [
         join(outputDir, "runtimes", "codex", "AGENTS.md"),
@@ -130,6 +132,7 @@ describe("installAgentPay", () => {
       assert.equal("SETUP_DEPLOYER_PRIVATE_KEY" in config, true);
       assert.equal("XLAYER_MAINNET_RPC_URL" in config, true);
       assert.equal("XLAYER_TESTNET_RPC_URL" in config, true);
+      assert.equal("AGENTPAY_MAINNET_MANIFEST_PATH" in config, true);
       assert.equal("AGENTPAY_OWNER_ADDRESS" in config, true);
       assert.equal("AGENTPAY_EXECUTOR_ADDRESS" in config, true);
       assert.equal("AGENTPAY_INITIAL_ROUTE_TARGETS" in config, true);
@@ -180,7 +183,7 @@ describe("installAgentPay", () => {
         assert.match(instructions, /check_wallet_creation/, runtime);
         assert.match(instructions, /get_agent_wallet[\s\S]*get_balance|get_balance[\s\S]*get_agent_wallet/, runtime);
         assert.match(instructions, /Never use raw wallet balances, exchange balances, or generic RPC balance/i, runtime);
-        assert.match(instructions, /hosted AgentPay MCP/i, runtime);
+        assert.match(instructions, /consumer AgentPay MCP/i, runtime);
         assert.match(instructions, /doctor.*self-hosted|self-hosted.*doctor/i, runtime);
         assert.match(instructions, /setup-web.*self-hosted|self-hosted.*setup-web/i, runtime);
         assert.doesNotMatch(instructions, /fills? the generated config/i, runtime);
@@ -233,7 +236,7 @@ describe("installAgentPay", () => {
       assert.match(config, /mcp_servers:/);
       assert.match(config, /roblox_studio:/);
       assert.match(config, /agentpay:/);
-      assert.match(config, /url: "https:\/\/mcp\.agentpay\.site\/mcp"/);
+      assert.match(config, /url: "https:\/\/wallet\.agentpay\.site\/mcp"/);
       assert.match(config, /enabled: true/);
       assert.ok(result.writtenFiles.includes(hermesConfigPath));
     } finally {
@@ -277,7 +280,7 @@ describe("installAgentPay", () => {
 
       assert.deepEqual(config.preferences, { theme: "dark" });
       assert.deepEqual(config.mcpServers.existing, { url: "https://example.com/mcp" });
-      assert.deepEqual(config.mcpServers.agentpay, { url: "https://mcp.agentpay.site/mcp" });
+      assert.deepEqual(config.mcpServers.agentpay, { url: "https://wallet.agentpay.site/mcp" });
       assert.ok(result.writtenFiles.includes(claudeDesktopConfigPath));
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -320,7 +323,7 @@ describe("installAgentPay", () => {
         command: "npx",
         args: ["-y", "@modelcontextprotocol/server-filesystem"],
       });
-      assert.deepEqual(config.mcpServers.agentpay, { url: "https://mcp.agentpay.site/mcp" });
+      assert.deepEqual(config.mcpServers.agentpay, { url: "https://wallet.agentpay.site/mcp" });
       assert.ok(result.writtenFiles.includes(cursorMcpConfigPath));
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -375,7 +378,7 @@ describe("installAgentPay", () => {
       const mcpConfig = JSON.parse(await readFile(join(outputDir, "runtimes", "generic", "mcp.json"), "utf8"));
 
       assert.deepEqual(mcpConfig.mcpServers.agentpay, {
-        url: "https://mcp.agentpay.site/mcp",
+        url: "https://wallet.agentpay.site/mcp",
       });
       assert.ok(result.writtenFiles.includes(join(outputDir, "runtimes", "generic", "instructions.md")));
     } finally {
@@ -475,6 +478,46 @@ describe("runAgentPayDoctor", () => {
     assert.doesNotMatch(report.text, /service-role-secret/);
     assert.doesNotMatch(report.text, new RegExp(`0x${"1".repeat(64)}`));
   });
+
+  it("rejects a remote HTTP Review & Sign URL while allowing loopback HTTP", async () => {
+    const baseEnv = {
+      SUPABASE_URL: "https://agentpay.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-secret",
+      XLAYER_RPC_URL: "https://rpc.example",
+      EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+      SETUP_DEPLOYER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
+      AGENTPAY_ACCOUNT_BYTECODE: "0x6000",
+    };
+
+    const insecure = await runAgentPayDoctor({
+      ...baseEnv,
+      SETUP_WEB_URL: "http://wallet.agentpay.site/setup",
+    });
+    const loopback = await runAgentPayDoctor({
+      ...baseEnv,
+      SETUP_WEB_URL: "http://localhost:3000/setup",
+    });
+
+    assert.ok(insecure.mcp.invalid.includes("SETUP_WEB_URL"));
+    assert.equal(loopback.mcp.invalid.includes("SETUP_WEB_URL"), false);
+  });
+
+  it("does not report setup web ready for a production or implicit mainnet surface", async () => {
+    const report = await runAgentPayDoctor({
+      SUPABASE_URL: "https://agentpay.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+      XLAYER_RPC_URL: "https://rpc.example",
+      SETUP_DEPLOYER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
+      EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+      AGENTPAY_ACCOUNT_BYTECODE: "0x6000",
+      AGENTPAY_ENVIRONMENT: "production",
+      AGENTPAY_HOME_CHAIN_ID: "196",
+    });
+
+    assert.equal(report.setup.status, "invalid");
+    assert.ok(report.setup.invalid.includes("production setup deployment surface"));
+    assert.ok(report.setup.invalid.includes("mainnet setup deployment surface"));
+  });
 });
 
 describe("runAgentPayCli", () => {
@@ -556,7 +599,7 @@ describe("runAgentPayCli", () => {
         SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
         XLAYER_RPC_URL: "https://rpc.example",
         SETUP_DEPLOYER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
-        AGENTPAY_ACCOUNT_BYTECODE: "0x6000",
+        AGENTPAY_ACCOUNT_BYTECODE: v2TestBytecode,
         SETUP_WEB_PORT: "3333",
       },
       async startSetupWebServer(_dependencies, options) {
@@ -597,6 +640,7 @@ describe("runAgentPayCli", () => {
           url: "http://0.0.0.0:8080",
           mcpUrl: "http://0.0.0.0:8080/mcp",
           healthUrl: "http://0.0.0.0:8080/healthz",
+          readinessUrl: "http://0.0.0.0:8080/readyz",
           async close() {},
         };
       },

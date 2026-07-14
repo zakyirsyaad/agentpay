@@ -69,22 +69,27 @@ async function main() {
     await access(join(installDir, "skills", "agentpay", "SKILL.md"));
     await access(join(installDir, "skills", "agentpay", "agents", "openai.yaml"));
     const mcpConfig = JSON.parse(await readFile(join(installDir, "runtimes", "codex", "mcp.json"), "utf8"));
-    if (mcpConfig.mcpServers?.agentpay?.url !== "https://mcp.agentpay.site/mcp") {
+    if (mcpConfig.mcpServers?.agentpay?.url !== "https://wallet.agentpay.site/mcp") {
       throw new Error("Default AgentPay install did not use the hosted MCP URL.");
     }
     const claudeConfig = JSON.parse(await readFile(getClaudeDesktopConfigPath(claudeHomeEnv), "utf8"));
-    if (claudeConfig.mcpServers?.agentpay?.url !== "https://mcp.agentpay.site/mcp") {
+    if (claudeConfig.mcpServers?.agentpay?.url !== "https://wallet.agentpay.site/mcp") {
       throw new Error("Claude install did not register the hosted AgentPay MCP URL.");
     }
     const cursorConfig = JSON.parse(await readFile(join(cursorHomeDir, ".cursor", "mcp.json"), "utf8"));
-    if (cursorConfig.mcpServers?.agentpay?.url !== "https://mcp.agentpay.site/mcp") {
+    if (cursorConfig.mcpServers?.agentpay?.url !== "https://wallet.agentpay.site/mcp") {
       throw new Error("Cursor install did not register the hosted AgentPay MCP URL.");
     }
     const hermesConfig = await readFile(join(hermesHomeDir, ".hermes", "config.yaml"), "utf8");
-    if (!/agentpay:[\s\S]*url: "https:\/\/mcp\.agentpay\.site\/mcp"/.test(hermesConfig)) {
+    if (!/agentpay:[\s\S]*url: "https:\/\/wallet\.agentpay\.site\/mcp"/.test(hermesConfig)) {
       throw new Error("Hermes install did not register the hosted AgentPay MCP URL.");
     }
-    await access(join(selfHostedInstallDir, "AgentPayAccount.bin"));
+    const packagedBytecode = await readFile(join(selfHostedInstallDir, "AgentPayAccount.bin"), "utf8");
+    for (const selector of ["9cc1e242", "7b3f2401", "83e988c1", "7882731c"]) {
+      if (!packagedBytecode.toLowerCase().includes(selector)) {
+        throw new Error(`Packaged AgentPayAccount.bin is missing AgentPayAccountV2 selector ${selector}.`);
+      }
+    }
     await access(join(selfHostedInstallDir, "config.json"));
     console.log("AgentPay release smoke passed.");
   } finally {

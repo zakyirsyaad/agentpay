@@ -34,6 +34,14 @@ describe("publishable AgentPay package manifests", () => {
     await access("scripts/smoke-agentpay-release.mjs");
   });
 
+  it("keeps mainnet and testnet deployment commands explicit", async () => {
+    const rootManifest = await readPackageJson(".");
+
+    assert.match(rootManifest.scripts?.["contracts:deploy:xlayer"] ?? "", /XLAYER_MAINNET_RPC_URL/);
+    assert.match(rootManifest.scripts?.["contracts:deploy:xlayer:testnet"] ?? "", /XLAYER_TESTNET_RPC_URL/);
+    assert.equal(rootManifest.scripts?.["contracts:deploy:xlayer:legacy"], undefined);
+  });
+
   it("keeps the npx install dependency chain publishable", async () => {
     const packages = new Map(
       await Promise.all(
@@ -162,7 +170,7 @@ describe("publishable AgentPay package manifests", () => {
       const template = JSON.parse(await readFile(templatePath, "utf8"));
 
       assert.deepEqual(template.mcpServers.agentpay, {
-        url: "https://mcp.agentpay.site/mcp",
+        url: "https://wallet.agentpay.site/mcp",
       });
     }
   });
@@ -172,7 +180,9 @@ describe("publishable AgentPay package manifests", () => {
 
     assert.ok(manifest.files.includes("src/mcp/http.ts"));
     assert.ok(manifest.files.includes("src/mcp/okx-agent-payment.ts"));
+    assert.ok(manifest.files.includes("src/runtime/paid-execution-canary-ledger.ts"));
     await access("apps/mcp-server/src/mcp/http.ts");
     await access("apps/mcp-server/src/mcp/okx-agent-payment.ts");
+    await access("apps/mcp-server/src/runtime/paid-execution-canary-ledger.ts");
   });
 });

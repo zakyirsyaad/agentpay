@@ -2,7 +2,7 @@
   "name": "agentpay",
   "version": "0.1.0",
   "private": true,
-  "description": "Chat-approved cross-chain payments for AI agents.",
+  "description": "Owner-authorized cross-chain payments for AI agents.",
   "type": "module",
   "workspaces": [
     "apps/*",
@@ -12,11 +12,15 @@
     "build": "npm run build --workspaces --if-present",
     "contracts:build": "cd contracts && forge build",
     "contracts:bytecode": "npm run contracts:build && node scripts/export-agentpay-bytecode.mjs",
-    "contracts:deploy:xlayer": "cd contracts && forge script script/DeployAgentPayAccount.s.sol:DeployAgentPayAccount --rpc-url \"$XLAYER_RPC_URL\" --broadcast",
+    "contracts:deploy:xlayer": "cd contracts && forge script script/DeployAgentPayAccountV2.s.sol:DeployAgentPayAccountV2 --rpc-url \"$XLAYER_MAINNET_RPC_URL\" --broadcast",
+    "contracts:deploy:xlayer:testnet": "cd contracts && forge script script/DeployAgentPayAccountV2.s.sol:DeployAgentPayAccountV2 --rpc-url \"$XLAYER_TESTNET_RPC_URL\" --broadcast",
     "demo:local": "tsx scripts/demo-agentpay-flow.ts",
     "lint": "npm run lint --workspaces --if-present",
+    "manifest:mainnet:shadow": "node scripts/generate-mainnet-shadow-manifest.mjs",
+    "manifest:mainnet:activate": "node scripts/mainnet-activation-manifest.mjs",
     "release:smoke": "node scripts/smoke-agentpay-release.mjs",
     "test": "npm run test --workspaces --if-present && npm run test:scripts && npm run test:contracts",
+    "test:e2e": "playwright test --config apps/setup-web/playwright.config.ts",
     "test:contracts": "cd contracts && forge test",
     "test:scripts": "node --test scripts/*.test.mjs && tsx --test \"scripts/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -33,6 +37,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^26.1.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"

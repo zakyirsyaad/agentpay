@@ -21,7 +21,7 @@ import {
 } from "@agentpay-ai/setup-web";
 
 const runtimeNames = ["codex", "claude", "cursor", "generic", "hermes"] as const;
-const DEFAULT_HOSTED_MCP_URL = "https://mcp.agentpay.site/mcp";
+const DEFAULT_HOSTED_MCP_URL = "https://wallet.agentpay.site/mcp";
 const requiredConfigKeys = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "XLAYER_RPC_URL", "EXECUTOR_PRIVATE_KEY"] as const;
 const setupRequiredConfigKeys = [
   "SUPABASE_URL",
@@ -40,6 +40,11 @@ const optionalConfigKeys = [
   "AGENTPAY_OWNER_ADDRESS",
   "AGENTPAY_EXECUTOR_ADDRESS",
   "AGENTPAY_HOME_CHAIN_ID",
+  "AGENTPAY_HTTP_MODE",
+  "AGENTPAY_ENVIRONMENT",
+  "AGENTPAY_MAINNET_MANIFEST_PATH",
+  "AGENTPAY_SESSION_HASH_KEY",
+  "AGENTPAY_REVIEW_TOKEN_SECRET",
   "AGENTPAY_ACCOUNT_ADDRESS",
   "AGENTPAY_XLAYER_USDT0_ADDRESS",
   "AGENTPAY_XLAYER_USDC_ADDRESS",
@@ -47,6 +52,8 @@ const optionalConfigKeys = [
   "AGENTPAY_XLAYER_TESTNET_USDC_ADDRESS",
   "AGENTPAY_ACCOUNT_BYTECODE_PATH",
   "AGENTPAY_ACCOUNT_BYTECODE",
+  "AGENTPAY_ACCOUNT_VERSION",
+  "AGENTPAY_ACCOUNT_BYTECODE_HASH",
   "AGENTPAY_INITIAL_ROUTE_TARGETS",
   "SETUP_WEB_PORT",
   "X402_BAZAAR_FACILITATOR_URL",
@@ -54,6 +61,7 @@ const optionalConfigKeys = [
   "AGENTPAY_A2MCP_PAYMENT_PAY_TO",
   "AGENTPAY_A2MCP_PAYMENT_PRICE",
   "AGENTPAY_A2MCP_PAYMENT_NETWORK",
+  "AGENTPAY_A2MCP_PAYMENT_ASSET",
   "AGENTPAY_A2MCP_PAYMENT_MAX_TIMEOUT_SECONDS",
   "AGENTPAY_A2MCP_PAYMENT_ASSET_DECIMALS",
   "AGENTPAY_A2MCP_PAYMENT_SYNC_SETTLE",
@@ -66,6 +74,7 @@ const optionalConfigKeys = [
 ] as const;
 const privateKeyPattern = /^0x[a-fA-F0-9]{64}$/;
 const hexDataPattern = /^0x(?:[a-fA-F0-9]{2})+$/;
+const bytes32Pattern = /^0x[a-fA-F0-9]{64}$/;
 const addressPattern = /^0x[a-fA-F0-9]{40}$/;
 const require = createRequire(import.meta.url);
 
@@ -204,8 +213,10 @@ export async function runAgentPayCli(
         hostname: command.hostname,
         port: command.port,
       });
-      stdout(`AgentPay public MCP listening at ${server.mcpUrl}`);
+      const surface = env.AGENTPAY_HTTP_MODE === "consumer" ? "consumer" : "public";
+      stdout(`AgentPay ${surface} MCP listening at ${server.mcpUrl}`);
       stdout(`AgentPay health check at ${server.healthUrl}`);
+      stdout(`AgentPay readiness check at ${server.readinessUrl}`);
       return 0;
     }
 
@@ -409,7 +420,10 @@ function validateMcpConfig(env: Record<string, string | undefined>): AgentPayDoc
     env.X402_BAZAAR_FACILITATOR_URL && !isHttpUrl(env.X402_BAZAAR_FACILITATOR_URL)
       ? "X402_BAZAAR_FACILITATOR_URL"
       : undefined,
-    env.SETUP_WEB_URL && !isHttpUrl(env.SETUP_WEB_URL) ? "SETUP_WEB_URL" : undefined,
+    env.SETUP_WEB_URL && !isSecureReviewUrl(env.SETUP_WEB_URL) ? "SETUP_WEB_URL" : undefined,
+    env.AGENTPAY_REVIEW_TOKEN_SECRET && env.AGENTPAY_REVIEW_TOKEN_SECRET.length < 32
+      ? "AGENTPAY_REVIEW_TOKEN_SECRET"
+      : undefined,
   ].filter((name): name is string => Boolean(name));
 
   return createDoctorSection(missing, invalid);
@@ -437,6 +451,17 @@ async function validateSetupConfig(env: Record<string, string | undefined>): Pro
     env.AGENTPAY_ACCOUNT_BYTECODE && !hexDataPattern.test(env.AGENTPAY_ACCOUNT_BYTECODE)
       ? "AGENTPAY_ACCOUNT_BYTECODE"
       : undefined,
+    env.AGENTPAY_ACCOUNT_VERSION && env.AGENTPAY_ACCOUNT_VERSION !== "v2"
+      ? "AGENTPAY_ACCOUNT_VERSION"
+      : undefined,
+    env.AGENTPAY_ACCOUNT_BYTECODE_HASH && !bytes32Pattern.test(env.AGENTPAY_ACCOUNT_BYTECODE_HASH)
+      ? "AGENTPAY_ACCOUNT_BYTECODE_HASH"
+      : undefined,
+    env.AGENTPAY_REVIEW_TOKEN_SECRET && env.AGENTPAY_REVIEW_TOKEN_SECRET.length < 32
+      ? "AGENTPAY_REVIEW_TOKEN_SECRET"
+      : undefined,
+    env.AGENTPAY_ENVIRONMENT === "production" ? "production setup deployment surface" : undefined,
+    env.AGENTPAY_HOME_CHAIN_ID === "196" ? "mainnet setup deployment surface" : undefined,
     env.AGENTPAY_ACCOUNT_BYTECODE_PATH && !(await canReadFile(env.AGENTPAY_ACCOUNT_BYTECODE_PATH))
       ? "AGENTPAY_ACCOUNT_BYTECODE_PATH"
       : undefined,
@@ -508,6 +533,22 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isSecureReviewUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:") {
+      return true;
+    }
+    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
 function isPort(value: string): boolean {

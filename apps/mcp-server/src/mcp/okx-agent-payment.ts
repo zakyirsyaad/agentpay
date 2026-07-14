@@ -10,8 +10,10 @@ import {
 import { x402ResourceServer } from "@okxweb3/x402-core/server";
 import type { Network, PaymentPayload, PaymentRequirements } from "@okxweb3/x402-core/types";
 import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
+import { MAINNET_CAIP2, MAINNET_USDT0_ADDRESS } from "../runtime/production-readiness.ts";
 
 const enabledValues = new Set(["1", "true", "yes", "on"]);
+const disabledValues = new Set(["0", "false", "no", "off"]);
 const DEFAULT_A2MCP_PAYMENT_NETWORK = "eip155:196" satisfies Network;
 const DEFAULT_A2MCP_PAYMENT_TIMEOUT_SECONDS = 300;
 const DEFAULT_A2MCP_PAYMENT_ASSET_DECIMALS = 6;
@@ -33,6 +35,7 @@ export interface AgentPayMcpPaymentConfig {
   payTo: string;
   price: string;
   network: Network;
+  asset?: string;
   maxTimeoutSeconds: number;
   facilitatorUrl?: string;
   okxApiKey?: string;
@@ -52,8 +55,12 @@ export function parseAgentPayMcpPaymentEnv(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
 ): AgentPayMcpPaymentConfig | undefined {
   const normalized = normalizeEnv(env);
+  const enabledValue = normalized.AGENTPAY_A2MCP_PAYMENT_ENABLED?.toLowerCase();
 
-  if (!enabledValues.has((normalized.AGENTPAY_A2MCP_PAYMENT_ENABLED ?? "").toLowerCase())) {
+  if (enabledValue && !enabledValues.has(enabledValue) && !disabledValues.has(enabledValue)) {
+    throw new Error("Invalid AgentPay A2MCP payment environment (invalid: AGENTPAY_A2MCP_PAYMENT_ENABLED).");
+  }
+  if (!enabledValue || disabledValues.has(enabledValue)) {
     return undefined;
   }
 
@@ -66,6 +73,8 @@ export function parseAgentPayMcpPaymentEnv(
     DEFAULT_A2MCP_PAYMENT_ASSET_DECIMALS,
   );
   const network = normalized.AGENTPAY_A2MCP_PAYMENT_NETWORK ?? DEFAULT_A2MCP_PAYMENT_NETWORK;
+  const asset = normalized.AGENTPAY_A2MCP_PAYMENT_ASSET ??
+    (network === MAINNET_CAIP2 ? MAINNET_USDT0_ADDRESS : undefined);
   const missing = [
     normalized.AGENTPAY_A2MCP_PAYMENT_PAY_TO ? undefined : "AGENTPAY_A2MCP_PAYMENT_PAY_TO",
     normalized.AGENTPAY_A2MCP_PAYMENT_PRICE ? undefined : "AGENTPAY_A2MCP_PAYMENT_PRICE",
@@ -84,6 +93,10 @@ export function parseAgentPayMcpPaymentEnv(
   const invalid = [
     normalized.AGENTPAY_A2MCP_PAYMENT_PAY_TO && !addressPattern.test(normalized.AGENTPAY_A2MCP_PAYMENT_PAY_TO)
       ? "AGENTPAY_A2MCP_PAYMENT_PAY_TO"
+      : undefined,
+    asset && !addressPattern.test(asset) ? "AGENTPAY_A2MCP_PAYMENT_ASSET" : undefined,
+    network === MAINNET_CAIP2 && asset?.toLowerCase() !== MAINNET_USDT0_ADDRESS.toLowerCase()
+      ? "AGENTPAY_A2MCP_PAYMENT_ASSET"
       : undefined,
     !caip2EvmNetworkPattern.test(network) ? "AGENTPAY_A2MCP_PAYMENT_NETWORK" : undefined,
     normalized.AGENTPAY_A2MCP_PAYMENT_MAX_TIMEOUT_SECONDS && !maxTimeoutSeconds
@@ -112,6 +125,7 @@ export function parseAgentPayMcpPaymentEnv(
     payTo: normalized.AGENTPAY_A2MCP_PAYMENT_PAY_TO,
     price: normalized.AGENTPAY_A2MCP_PAYMENT_PRICE,
     network: network as Network,
+    asset,
     maxTimeoutSeconds,
     assetDecimals,
     facilitatorUrl: normalized.AGENTPAY_A2MCP_PAYMENT_FACILITATOR_URL,
@@ -119,7 +133,7 @@ export function parseAgentPayMcpPaymentEnv(
     okxSecretKey: normalized.OKX_APP_SECRET_KEY,
     okxPassphrase: normalized.OKX_APP_PASSPHRASE,
     okxBaseUrl: normalized.OKX_APP_BASE_URL,
-    syncSettle: parseOptionalBoolean(normalized.AGENTPAY_A2MCP_PAYMENT_SYNC_SETTLE),
+    syncSettle: parseOptionalBoolean(normalized.AGENTPAY_A2MCP_PAYMENT_SYNC_SETTLE, "AGENTPAY_A2MCP_PAYMENT_SYNC_SETTLE"),
     assetTransferMethod: normalized.AGENTPAY_A2MCP_PAYMENT_ASSET_TRANSFER_METHOD as
       | AgentPayMcpPaymentConfig["assetTransferMethod"]
       | undefined,
@@ -192,11 +206,18 @@ function createFacilitatorClient(config: AgentPayMcpPaymentConfig) {
 }
 
 function createPaymentOption(config: AgentPayMcpPaymentConfig): PaymentOption {
+  const price = config.asset
+    ? {
+        amount: config.network === MAINNET_CAIP2 && config.price === "$0.01" ? "10000" : config.price,
+        asset: config.asset,
+      }
+    : config.price;
+
   return {
     scheme: "exact",
     network: config.network,
     payTo: config.payTo,
-    price: config.price,
+    price,
     maxTimeoutSeconds: config.maxTimeoutSeconds,
     extra: omitUndefined({
       assetTransferMethod: config.assetTransferMethod,
@@ -229,12 +250,15 @@ function parseOptionalPositiveInteger(value: string | undefined, fallback: numbe
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function parseOptionalBoolean(value: string | undefined): boolean | undefined {
+function parseOptionalBoolean(value: string | undefined, name: string): boolean | undefined {
   if (!value) {
     return undefined;
   }
 
-  return enabledValues.has(value.toLowerCase());
+  const normalized = value.toLowerCase();
+  if (enabledValues.has(normalized)) return true;
+  if (disabledValues.has(normalized)) return false;
+  throw new Error(`Invalid AgentPay A2MCP payment environment (invalid: ${name}).`);
 }
 
 function isHttpUrl(value: string): boolean {

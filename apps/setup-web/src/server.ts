@@ -1,4 +1,5 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
+import { isIP } from "node:net";
 
 import {
   checkWalletCreationInputSchema,
@@ -8,16 +9,36 @@ import {
 } from "@agentpay-ai/shared";
 
 import type { CompleteWalletSetupOutput } from "./services/complete-wallet-setup.ts";
+import {
+  createPaymentReviewHandler,
+  createPaymentReviewPageResponse,
+  paymentReviewClientIdHeader,
+  type PaymentReviewWebDependencies,
+} from "./payment-review.ts";
 
 export interface SetupWebDependencies {
   getSetupIntent(setupIntentId: string): Promise<SetupIntentRecord | null>;
   completeWalletSetup(input: CompleteWalletSetupInput): Promise<CompleteWalletSetupOutput>;
   clock: () => Date;
+  paymentReviews?: PaymentReviewWebDependencies["paymentReviews"];
+  paymentIntents?: PaymentReviewWebDependencies["paymentIntents"];
+  reviewTokenSecret?: string;
+  rateLimiter?: PaymentReviewWebDependencies["rateLimiter"];
 }
 
 export function createSetupWebHandler(dependencies: SetupWebDependencies) {
+  const paymentReviewHandler = createPaymentReviewHandler(dependencies);
+
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+
+    if (url.pathname === "/review" && request.method === "GET") {
+      return createPaymentReviewPageResponse();
+    }
+
+    if (url.pathname === "/api/payment-review") {
+      return paymentReviewHandler(request);
+    }
 
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/setup")) {
       return htmlResponse(renderSetupPage());
@@ -136,17 +157,28 @@ export async function startSetupWebServer(
 ): Promise<{ close(): Promise<void>; url: string }> {
   const handler = createSetupWebHandler(dependencies);
   const server = createServer(async (request, response) => {
-    const origin = `http://${request.headers.host ?? "localhost"}`;
-    const webRequest = new Request(new URL(request.url ?? "/", origin), {
-      method: request.method,
-      headers: request.headers as HeadersInit,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
-      duplex: "half",
-    } as RequestInit);
-    const webResponse = await handler(webRequest);
+    try {
+      const origin = `http://${request.headers.host ?? "localhost"}`;
+      const headers = new Headers(request.headers as HeadersInit);
+      headers.set(paymentReviewClientIdHeader, resolveReviewClientId(request));
+      const webRequest = new Request(new URL(request.url ?? "/", origin), {
+        method: request.method,
+        headers,
+        body: request.method === "GET" || request.method === "HEAD" ? undefined : request,
+        duplex: "half",
+      } as RequestInit);
+      const webResponse = await handler(webRequest);
 
-    response.writeHead(webResponse.status, Object.fromEntries(webResponse.headers.entries()));
-    response.end(Buffer.from(await webResponse.arrayBuffer()));
+      response.writeHead(webResponse.status, Object.fromEntries(webResponse.headers.entries()));
+      response.end(Buffer.from(await webResponse.arrayBuffer()));
+    } catch {
+      response.writeHead(503, {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ error: "Service unavailable." }));
+    }
   });
   const port = options.port ?? 3000;
   const hostname = options.hostname ?? "127.0.0.1";
@@ -158,14 +190,42 @@ export async function startSetupWebServer(
       resolve();
     });
   });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error("Setup web server did not expose a TCP address.");
+  }
 
   return {
-    url: `http://${hostname}:${port}/setup`,
+    url: `http://${hostname}:${address.port}/setup`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       }),
   };
+}
+
+function resolveReviewClientId(request: IncomingMessage): string {
+  const remoteAddress = normalizeRemoteAddress(request.socket.remoteAddress ?? "unknown");
+  const forwarded = request.headers["x-forwarded-for"];
+  const forwardedValues = Array.isArray(forwarded) ? forwarded : forwarded ? [forwarded] : [];
+  const forwardedAddress = forwardedValues
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .at(-1);
+
+  if (isLoopbackAddress(remoteAddress) && forwardedAddress && isIP(forwardedAddress) > 0) {
+    return normalizeRemoteAddress(forwardedAddress);
+  }
+  return remoteAddress;
+}
+
+function normalizeRemoteAddress(address: string): string {
+  return address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "127.0.0.1" || address === "::1";
 }
 
 async function handleGetSetupIntent(pathname: string, dependencies: SetupWebDependencies): Promise<Response> {

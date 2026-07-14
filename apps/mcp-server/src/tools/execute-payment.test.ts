@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Wallet } from "ethers";
 
 import { executePayment } from "./execute-payment.ts";
+import { createDirectPaymentAuthorizationFromIntent } from "../services/payment-authorization.ts";
 
 const awaitingIntent = {
   id: "pay_123",
@@ -74,6 +76,68 @@ const contractCallIntent = {
 };
 
 describe("executePayment", () => {
+  it("executes a V2 payment only with a valid owner EIP-712 signature", async () => {
+    const ownerWallet = new Wallet(`0x${"11".repeat(32)}`);
+    const intent = {
+      ...directIntent,
+      tenantId: "tenant_123",
+      ownerAddress: ownerWallet.address,
+      deadline: "2026-07-02T14:45:00.000Z",
+    };
+    const typedData = createDirectPaymentAuthorizationFromIntent(intent, intent.tenantId);
+    const signature = await ownerWallet.signTypedData(
+      typedData.domain,
+      typedData.types as unknown as Record<string, Array<{ name: string; type: string }>>,
+      typedData.message,
+    );
+    const executions: unknown[] = [];
+
+    const result = await executePayment(
+      { paymentIntentId: intent.id, signature },
+      {
+        clock: () => new Date("2026-07-02T14:40:00.000Z"),
+        paymentIntents: {
+          getPaymentIntent: async () => intent,
+          claimPaymentApproval: async () => true,
+          markPaymentExecuting: async () => undefined,
+          markPaymentFailed: async (_id, code, message) => {
+            throw new Error(`${code}: ${message}`);
+          },
+          markPaymentExpired: async () => {
+            throw new Error("should not expire");
+          },
+        },
+        balances: {
+          hasSufficientTokenBalance: async () => true,
+        },
+        executor: {
+          executeDirectPayment: async () => {
+            throw new Error("legacy executor must not be used");
+          },
+          executeRoutePayment: async () => {
+            throw new Error("legacy executor must not be used");
+          },
+          executeContractCall: async () => {
+            throw new Error("legacy executor must not be used");
+          },
+        },
+        authorizedExecutor: {
+          executeAuthorizedDirectPayment: async (request) => {
+            executions.push(request);
+            return { sourceTxHash: `0x${"aa".repeat(32)}` };
+          },
+          executeAuthorizedRoutePayment: async () => {
+            throw new Error("should not execute route");
+          },
+        },
+      },
+    );
+
+    assert.equal(result.sourceTxHash, `0x${"aa".repeat(32)}`);
+    assert.equal(executions.length, 1);
+    assert.equal((executions[0] as { authorization: { amount: string } }).authorization.amount, "10000000");
+  });
+
   it("executes stored route calldata after exact approval and marks intent executing", async () => {
     const updates: unknown[] = [];
     const claims: unknown[] = [];

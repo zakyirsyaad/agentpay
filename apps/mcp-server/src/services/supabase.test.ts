@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createSessionContext, type PaymentReviewHandoffRecord } from "@agentpay-ai/shared";
 
 import {
   type AgentPaySupabaseClient,
   createSupabaseAgentPayRepositories,
   toPaymentIntentRow,
 } from "./supabase.ts";
+import { createPaidExecutionIdempotencyKey } from "./paid-execution-lifecycle.ts";
 
 class FakeSelectQuery {
   public calls: Array<[string, unknown[]]> = [];
@@ -201,6 +203,41 @@ class FakePaymentIntentListQuery {
     this.calls.push(["then", []]);
     resolve({ data: this.data, error: null });
   }
+}
+
+class FakePaymentReviewQuery {
+  public calls: Array<[string, unknown[]]> = [];
+  public inserted: unknown;
+  public updated: unknown;
+  public maybeSingleData: unknown;
+  public maybeSingleDataQueue: unknown[] = [];
+
+  select(columns: string) { this.calls.push(["select", [columns]]); return this; }
+  insert(row: unknown) { this.inserted = row; return Promise.resolve({ error: null }); }
+  update(row: unknown) { this.updated = row; this.calls.push(["update", [row]]); return this; }
+  eq(column: string, value: string) { this.calls.push(["eq", [column, value]]); return this; }
+  gt(column: string, value: string) { this.calls.push(["gt", [column, value]]); return this; }
+  maybeSingle() {
+    this.calls.push(["maybeSingle", []]);
+    const data = this.maybeSingleDataQueue.length > 0
+      ? this.maybeSingleDataQueue.shift()
+      : this.maybeSingleData;
+    return Promise.resolve({ data: data ?? null, error: null });
+  }
+}
+
+class FakePaidExecutionLifecycleQuery {
+  public calls: Array<[string, unknown[]]> = [];
+  public inserted: unknown;
+  public updated: unknown;
+  public insertError: { message: string } | null = null;
+  public maybeSingleData: any = null;
+
+  select(columns: string) { this.calls.push(["select", [columns]]); return this; }
+  insert(row: unknown) { this.inserted = row; return Promise.resolve({ error: this.insertError }); }
+  update(row: unknown) { this.updated = row; this.calls.push(["update", [row]]); return this; }
+  eq(column: string, value: string) { this.calls.push(["eq", [column, value]]); return this; }
+  maybeSingle() { this.calls.push(["maybeSingle", []]); return Promise.resolve({ data: this.maybeSingleData, error: null }); }
 }
 
 class FakeSetupIntentQuery {
@@ -911,6 +948,241 @@ describe("createSupabaseAgentPayRepositories", () => {
       status: "ACTIVE",
     });
   });
+
+  it("keeps Review & Sign handoffs tenant-scoped and performs an atomic signature transition", async () => {
+    const reviewRow = {
+      id: "review_123",
+      payment_intent_id: "pay_123",
+      tenant_id: "tenant_a",
+      owner_address: "0x2222222222222222222222222222222222222222",
+      account_address: "0x3333333333333333333333333333333333333333",
+      source_chain_id: 196,
+      authorization_hash: `0x${"a".repeat(64)}`,
+      token_digest: `0x${"b".repeat(64)}`,
+      status: "PENDING",
+      signature: null,
+      created_at: "2026-07-12T23:00:00.000Z",
+      expires_at: "2026-07-13T00:00:00.000Z",
+      signed_at: null,
+    };
+    const reviewQuery = new FakePaymentReviewQuery();
+    reviewQuery.maybeSingleData = reviewRow;
+    const events = new FakePaymentEventQuery();
+    const client = {
+      from(table: string) {
+        if (table === "payment_review_handoffs") return reviewQuery;
+        if (table === "payment_events") return events;
+        throw new Error(`Unexpected table ${table}`);
+      },
+    };
+    const context = createSessionContext({
+      sessionId: "session_review",
+      tenantId: "tenant_a",
+      ownerAddress: reviewRow.owner_address,
+      accountAddress: reviewRow.account_address,
+      homeChainId: 196,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "staging",
+      scopes: ["payment:review"],
+      authEpoch: 0,
+      issuedAt: "2026-07-12T22:00:00.000Z",
+      expiresAt: "2026-07-13T01:00:00.000Z",
+    });
+    const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient, context);
+    const handoff = await repositories.paymentReviews.getPaymentReviewHandoffByTokenDigest(reviewRow.token_digest);
+    assert.equal(handoff?.tenantId, "tenant_a");
+    assert.ok(reviewQuery.calls.some(([name, args]) => name === "eq" && args[0] === "tenant_id" && args[1] === "tenant_a"));
+
+    const result = await repositories.paymentReviews.attachPaymentReviewSignature({
+      tokenDigest: reviewRow.token_digest,
+      signature: `0x${"c".repeat(130)}`,
+      signedAt: "2026-07-12T23:30:00.000Z",
+    });
+    assert.equal(result.status, "SIGNED");
+    assert.deepEqual(reviewQuery.updated, {
+      status: "SIGNED",
+      signature: `0x${"c".repeat(130)}`,
+      signed_at: "2026-07-12T23:30:00.000Z",
+    });
+    assert.ok(reviewQuery.calls.some(([name]) => name === "gt"));
+    assert.equal(events.inserted.length, 0, "database triggers own atomic Review & Sign audit events");
+  });
+
+  it("recovers a concurrent identical signature by token digest after losing the atomic update", async () => {
+    const signature = `0x${"c".repeat(130)}`;
+    const signedRow = {
+      id: "review_race",
+      payment_intent_id: "pay_race",
+      tenant_id: "tenant_a",
+      owner_address: "0x2222222222222222222222222222222222222222",
+      account_address: "0x3333333333333333333333333333333333333333",
+      source_chain_id: 196,
+      authorization_hash: `0x${"a".repeat(64)}`,
+      token_digest: `0x${"b".repeat(64)}`,
+      status: "SIGNED",
+      signature,
+      created_at: "2026-07-12T23:00:00.000Z",
+      expires_at: "2026-07-13T00:00:00.000Z",
+      signed_at: "2026-07-12T23:30:00.000Z",
+    };
+    const reviewQuery = new FakePaymentReviewQuery();
+    reviewQuery.maybeSingleDataQueue = [null, signedRow];
+    const client = {
+      from(table: string) {
+        if (table === "payment_review_handoffs") return reviewQuery;
+        if (table === "payment_events") return new FakePaymentEventQuery();
+        throw new Error(`Unexpected table ${table}`);
+      },
+    };
+    const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
+
+    const result = await repositories.paymentReviews.attachPaymentReviewSignature({
+      tokenDigest: signedRow.token_digest,
+      signature,
+      signedAt: "2026-07-12T23:30:01.000Z",
+    });
+
+    assert.equal(result.status, "ALREADY_SIGNED");
+    assert.equal(
+      reviewQuery.calls.filter(([name, args]) => name === "eq" && args[0] === "token_digest").length,
+      2,
+    );
+    assert.equal(
+      reviewQuery.calls.some(([name, args]) => name === "eq" && args[0] === "payment_intent_id"),
+      false,
+    );
+  });
+
+  it("loads the operator-seeded singleton runtime environment identity", async () => {
+    const identityRow = {
+      id: 1,
+      environment: "production",
+      chain_id: 196,
+      caip2: "eip155:196",
+      supabase_project_ref: "abcdefghijklmnopqrst",
+      migration_head: "20260713140000_runtime_environment_identity",
+      release_commit: null,
+      manifest_sha256: "a".repeat(64),
+      account_version: "v2",
+      account_address: null,
+      deployment_tx_hash: null,
+      creation_bytecode_hash: `0x${"b".repeat(64)}`,
+      runtime_bytecode_hash: null,
+      abi_sha256: null,
+      owner_address: null,
+      executor_address: null,
+      deployer_address: null,
+      eip712_verifying_contract: null,
+      token_address: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+      token_code_hash: `0x${"c".repeat(64)}`,
+      token_decimals: 6,
+      x402_network: "eip155:196",
+      x402_asset: "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+      x402_price: "$0.01",
+      x402_price_atomic: "10000",
+      x402_sync_settle: true,
+      x402_enabled: false,
+      pay_to_address: null,
+      facilitator_ref: null,
+      public_origin: null,
+      execution_mode: "OFF",
+      status: "SHADOW_ONLY",
+    } as const;
+    const query = {
+      select() { return this; },
+      eq() { return this; },
+      maybeSingle() { return Promise.resolve({ data: identityRow, error: null }); },
+    };
+    const client = {
+      from(table: string) {
+        assert.equal(table, "runtime_environment_identity");
+        return query;
+      },
+    };
+
+    const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
+    const identity = await repositories.runtimeEnvironment.getIdentity();
+    assert.equal(identity?.environment, "production");
+    assert.equal(identity?.chainId, 196);
+    assert.equal(identity?.executionMode, "OFF");
+    assert.equal(identity?.status, "SHADOW_ONLY");
+  });
+
+  it("persists paid execution lifecycle bindings and transitions", async () => {
+    const query = new FakePaidExecutionLifecycleQuery();
+    const client = {
+      from(table: string) {
+        assert.equal(table, "paid_execution_lifecycles");
+        return query;
+      },
+    };
+    const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
+    const input = {
+      id: "11111111-1111-4111-8111-111111111111",
+      tenantId: "22222222-2222-4222-8222-222222222222",
+      paymentIdentifier: "pay_identifier_123456",
+      paymentPayloadHash: "a".repeat(64),
+      paymentRequirementsHash: "b".repeat(64),
+      requestHash: "c".repeat(64),
+      toolName: "execute_payment" as const,
+      paymentIntentId: "pay_123",
+      argumentsHash: "d".repeat(64),
+      authorizationHash: `0x${"e".repeat(64)}`,
+      environment: "staging" as const,
+      createdAt: "2026-07-13T00:00:00.000Z",
+    };
+
+    const claim = await repositories.paidExecutionLifecycle.claim(input);
+    assert.equal(claim.disposition, "CLAIMED");
+    assert.deepEqual(query.inserted, {
+      id: input.id,
+      tenant_id: input.tenantId,
+      idempotency_key: createPaidExecutionIdempotencyKey({
+        paymentIdentifier: input.paymentIdentifier,
+        paymentPayloadHash: input.paymentPayloadHash,
+        tenantId: input.tenantId,
+      }),
+      payment_identifier: input.paymentIdentifier,
+      payment_payload_hash: input.paymentPayloadHash,
+      payment_requirements_hash: input.paymentRequirementsHash,
+      request_hash: input.requestHash,
+      tool_name: "execute_payment",
+      payment_intent_id: input.paymentIntentId,
+      arguments_hash: input.argumentsHash,
+      authorization_hash: input.authorizationHash,
+      environment: input.environment,
+      status: "CLAIMED",
+      fee_status: "ACCEPTED",
+      execution_status: "NOT_QUEUED",
+      refund_status: "NOT_REQUIRED",
+      created_at: input.createdAt,
+      updated_at: input.createdAt,
+    });
+
+    query.maybeSingleData = {
+      ...query.inserted,
+      status: "SETTLED",
+      fee_status: "SETTLED",
+      settlement_tx_hash: `0x${"1".repeat(64)}`,
+      settlement_headers: { "PAYMENT-RESPONSE": "receipt" },
+      response_status: null,
+      response_headers: null,
+      response_body_base64: null,
+      execution_tx_hash: null,
+      error_code: null,
+      error_message: null,
+      settled_at: "2026-07-13T00:00:01.000Z",
+      completed_at: null,
+    };
+    const settled = await repositories.paidExecutionLifecycle.markSettled(input.id, {
+      transaction: `0x${"1".repeat(64)}`,
+      headers: { "PAYMENT-RESPONSE": "receipt" },
+      at: "2026-07-13T00:00:01.000Z",
+    });
+    assert.equal(settled.status, "SETTLED");
+    assert.equal((query.updated as Record<string, unknown>).status, "SETTLED");
+    assert.equal((query.updated as Record<string, unknown>).settlement_tx_hash, `0x${"1".repeat(64)}`);
+  });
 });
 
 describe("toPaymentIntentRow", () => {
@@ -929,8 +1201,10 @@ describe("toPaymentIntentRow", () => {
       destinationTokenSymbol: "USDC",
       recipientAddress: "0x1111111111111111111111111111111111111111",
       amountOut: "10",
+      minAmountOut: "9.8",
       maxAmountIn: "10.18",
       maxNativeFee: "0",
+      nativeValue: "0",
       routeProvider: "LI.FI",
       routeTarget: "0x7777777777777777777777777777777777777777",
       routeCalldata: "0x1234",
@@ -944,5 +1218,7 @@ describe("toPaymentIntentRow", () => {
 
     assert.equal("estimated_fee" in row, false);
     assert.equal("estimated_eta_seconds" in row, false);
+    assert.equal(row.min_amount_out, "9.8");
+    assert.equal(row.native_value, "0");
   });
 });

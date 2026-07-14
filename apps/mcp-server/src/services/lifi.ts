@@ -28,6 +28,7 @@ interface LifiQuoteResponse {
   estimate?: {
     fromAmount?: string;
     toAmount?: string;
+    toAmountMin?: string;
     gasCosts?: Array<{ amountUSD?: string }>;
     feeCosts?: Array<{ amountUSD?: string }>;
     executionDuration?: number;
@@ -144,7 +145,11 @@ function normalizeLifiQuote(quote: LifiQuoteResponse): RouteQuote {
     sourceTokenAddress: fromToken.address,
     destinationTokenAddress: toToken.address,
     maxAmountIn: atomicToDecimal(fromAmount, fromToken.decimals),
-    maxNativeFee: transaction.value ?? "0",
+    nativeValue: normalizeNativeValue(transaction.value ?? "0"),
+    ...(quote.estimate?.toAmountMin
+      ? { minAmountOut: atomicToDecimal(quote.estimate.toAmountMin, toToken.decimals) }
+      : {}),
+    maxNativeFee: normalizeNativeValue(transaction.value ?? "0"),
     routeTarget: transaction.to,
     routeCalldata: transaction.data,
     routeCalldataHash: createRouteCalldataHash(transaction.data),
@@ -152,6 +157,18 @@ function normalizeLifiQuote(quote: LifiQuoteResponse): RouteQuote {
     estimatedFee: estimateFeeUsd(quote),
     estimatedEtaSeconds: quote.estimate?.executionDuration,
   };
+}
+
+function normalizeNativeValue(value: string): string {
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n) {
+      throw new Error("negative value");
+    }
+    return parsed.toString();
+  } catch {
+    throw new Error("LI.FI quote response contains an invalid native transaction value.");
+  }
 }
 
 function normalizeLifiStatus(status: LifiStatusResponse): RouteStatusResult {

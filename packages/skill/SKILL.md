@@ -1,11 +1,11 @@
 ---
 name: agentpay
-description: Use AgentPay MCP tools when a user wants an AI agent to create an AgentPay wallet, check balance, prepare a stablecoin payment, swap, bridge, pay across chains, or track payment status. Requires exact chat approval before execution.
+description: Use AgentPay MCP tools when a user wants an AI agent to create an AgentPay wallet, check balance, prepare a stablecoin payment, swap, bridge, pay across chains, or track payment status. Requires a verified owner EIP-712 signature before execution.
 ---
 
 # AgentPay
 
-AgentPay is an MCP payment plugin for chat-approved cross-chain payments from an X Layer smart account.
+AgentPay is an MCP payment plugin for owner-authorized cross-chain payments from an X Layer smart account.
 
 Use this skill when the user asks to create an AgentPay wallet, pay a wallet or invoice, swap and bridge funds, send USDT/USDC, check balance, or track an AgentPay transaction.
 
@@ -23,7 +23,7 @@ npx @agentpay-ai/agentpay install
 
 The install command only installs/configures the MCP plugin and instructions. It must not create a wallet, deploy a smart account, sign messages, approve payments, or move funds.
 
-Default installs connect to the hosted AgentPay MCP endpoint at `https://mcp.agentpay.site/mcp`. Users do not need Supabase, RPC, executor, deployer, or bytecode config for normal chat usage.
+Default installs connect to the authenticated consumer AgentPay MCP endpoint at `https://wallet.agentpay.site/mcp`. Users do not need Supabase, RPC, executor, deployer, or bytecode config for normal chat usage. The separate paid public execution ASP is `https://mcp.agentpay.site/mcp` and is used only after Review & Sign.
 
 After installation, ask the user to reload or reconnect the agent runtime if needed. Then return to the agent chat and continue with wallet creation or payment using AgentPay MCP tools.
 
@@ -83,8 +83,9 @@ Expected AgentPay tools:
 - `check_route_target_allowance`: check whether a LI.FI route target is already allowlisted.
 - `prepare_route_target_allowance`: prepare the owner transaction that allows or revokes a LI.FI route target.
 - `prepare_account_admin_transaction`: prepare owner transactions for pause, unpause, executor rotation, nonce cancellation, token allowlist updates, and withdrawals.
-- `prepare_payment`: create a payment intent and return the exact approval phrase.
-- `execute_payment`: execute only after exact approval phrase.
+- `prepare_payment`: create a payment intent and, for trusted consumer sessions, return a server-generated Review & Sign URL plus canonical EIP-712 typed data. The legacy approval phrase is migration-only.
+- `get_payment_signature`: poll the tenant-scoped Review & Sign handoff and return the verified owner signature without executing a payment.
+- `execute_payment`: execute a prepared payment with the owner signature on the public paid ASP. The authenticated consumer only prepares and reviews; approval text is local/migration-only and is not public payment authorization.
 - `track_payment`: track source and destination transaction status.
 - `list_transactions`: show recent payment intents and transactions.
 - `list_payment_events`: show lifecycle audit events for a specific payment intent.
@@ -167,8 +168,7 @@ Before execution:
 1. Show the target address, source token, max token spend, max native fee, calldata hash, deadline, and purpose.
 2. Call `check_route_target_allowance` for the contract target.
 3. If the target is not allowlisted, call `prepare_route_target_allowance` and ask the owner wallet to submit that owner transaction first.
-4. Ask for the exact approval phrase from `prepare_contract_call`.
-5. Call `execute_payment` only after exact approval.
+4. Treat contract-call execution as legacy/local-only until a dedicated owner-signed V2 authorization exists. Do not expose phrase-based contract-call execution on the public surface.
 
 Never prepare contract calls from vague prose, never modify calldata after preparation, and never execute against a target that AgentPay reports as not allowlisted.
 
@@ -179,12 +179,11 @@ For every payment:
 1. Understand the requested recipient, amount, token, X Layer source network, destination chain, and purpose. Ask for mainnet or testnet if omitted.
 2. Call `quote_payment_route` when route preview is useful or the source/destination token or chain may differ.
 3. Call `prepare_payment`.
-4. Show the returned payment summary to the user.
-5. Ask the user to reply with the exact approval phrase returned by AgentPay.
-6. Do not call `execute_payment` until the user replies with the exact phrase.
-7. Call `execute_payment` with the exact phrase.
-8. Call `track_payment` until the payment reaches a clear completed, failed, or still-executing state.
-9. Call `list_payment_events` when the user asks for audit history, failure detail, or lifecycle evidence for a payment.
+4. Show the returned payment summary to the user. When `authorization` is present, show the canonical typed-data details and exact `authorizationHash`.
+5. Open the returned `reviewUrl` for the owner. The connected wallet must use **Review & Sign** to sign the server-derived EIP-712 authorization. Do not let the agent, session, or x402 credential replace this signature.
+6. Poll `get_payment_signature` until it returns the verified 65-byte owner signature, then hand the `paymentIntentId` and signature to the public paid ASP and call its `execute_payment` tool. The authenticated consumer does not execute payments directly.
+7. Call `track_payment` until the payment reaches a clear completed, failed, or still-executing state.
+8. Call `list_payment_events` when the user asks for audit history, failure detail, or lifecycle evidence for a payment.
 
 The summary shown before approval must include:
 
@@ -200,19 +199,13 @@ The summary shown before approval must include:
 - Estimated ETA.
 - Deadline or expiry.
 - Purpose.
-- Exact approval phrase.
+- Authorization hash and owner-signature status.
 
 ## Approval Rules
 
-Approval must be exact.
+Payment authorization must be a valid owner EIP-712 signature over the immutable typed data returned by `prepare_payment`.
 
-Accept:
-
-```txt
-APPROVE pay_123
-```
-
-Reject vague confirmations:
+Reject vague confirmations or other chat-only messages as payment authorization:
 
 ```txt
 yes
@@ -223,24 +216,24 @@ looks good
 send it
 ```
 
-If the user gives a vague confirmation, ask them to reply with the exact phrase.
+If the owner has not signed Review & Sign, do not execute. The old `APPROVE pay_123` phrase is accepted only by an explicitly enabled local/migration adapter.
 
 Never execute a payment if:
 
-- The approval phrase does not match.
+- The owner signature is missing, malformed, or does not recover to the verified owner.
 - The intent expired.
 - The recipient, amount, route, token, or chain changed after preparation.
 - The user asks to skip confirmation.
 - Balance is insufficient.
 - AgentPay returns an error.
 
-If `execute_payment` says the intent is already being executed or is no longer awaiting approval, do not retry the same approval phrase. Call `track_payment` or `list_payment_events` for the current status.
+If the public paid ASP's `execute_payment` says the intent is already being executed or is no longer awaiting approval, do not retry the same signature. Call `track_payment` or `list_payment_events` for the current status.
 
 ## Insufficient Balance
 
 If balance is insufficient, do not ask for approval and do not create pressure to proceed.
 
-AgentPay checks source-token balance during `quote_payment_route`, `prepare_payment`, and `prepare_contract_call`, then checks again at `execute_payment`. If a preparation tool reports insufficient balance, no approval phrase should be requested from the user.
+AgentPay checks source-token balance during `quote_payment_route`, `prepare_payment`, and `prepare_contract_call`, then checks again at signed execution. If a preparation tool reports insufficient balance, no Review & Sign request should be made.
 
 Explain:
 
@@ -272,7 +265,7 @@ Use these responses:
 - Setup intent expired: create a new setup intent.
 - Quote unavailable: explain that no supported route is available and ask for a different token/chain/amount.
 - Insufficient balance: follow insufficient balance workflow.
-- Approval mismatch: ask for the exact approval phrase.
+- Signature mismatch: return to Review & Sign and prepare a fresh intent if any signed field changed.
 - Intent expired: prepare a fresh payment intent.
 - Execution failed: show the error, do not retry automatically, and ask whether to prepare a new intent.
 - Payment executing: call `track_payment` and report the latest status.

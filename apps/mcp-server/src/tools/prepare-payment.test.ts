@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { preparePayment } from "./prepare-payment.ts";
+import { hashPaymentReviewToken } from "../services/payment-review.ts";
 
 describe("preparePayment", () => {
   it("creates an awaiting-approval payment intent and returns agent instructions", async () => {
@@ -40,6 +41,8 @@ describe("preparePayment", () => {
             destinationTokenAddress: "0x6666666666666666666666666666666666666666",
             maxAmountIn: "10.18",
             maxNativeFee: "2500000000000000",
+            nativeValue: "2000000000000000",
+            minAmountOut: "9.95",
             routeTarget: "0x7777777777777777777777777777777777777777",
             routeCalldata: "0x1234",
             routeCalldataHash: "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432",
@@ -75,6 +78,9 @@ describe("preparePayment", () => {
     assert.equal(result.summary.destinationChain, "Base");
     assert.equal(result.summary.maxNativeFee, "2500000000000000");
     assert.equal(result.summary.maxNativeFeeDisplay, "0.0025 OKB");
+    assert.equal(result.summary.deadline, "2026-07-02T14:35:00.000Z");
+    assert.equal(result.summary.minAmountOut, "9.95");
+    assert.equal(result.summary.nativeValue, "2000000000000000");
     assert.equal(result.summary.routeTarget, "0x7777777777777777777777777777777777777777");
     assert.equal(result.summary.routeCalldataHash, "0x56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432");
     assert.equal(result.summary.requiresRouteTargetAllowlist, true);
@@ -94,8 +100,10 @@ describe("preparePayment", () => {
       destinationTokenSymbol: "USDC",
       recipientAddress: "0x1111111111111111111111111111111111111111",
       amountOut: "10",
+      minAmountOut: "9.95",
       maxAmountIn: "10.18",
       maxNativeFee: "2500000000000000",
+      nativeValue: "2000000000000000",
       routeProvider: "LI.FI",
       routeTarget: "0x7777777777777777777777777777777777777777",
       routeCalldata: "0x1234",
@@ -104,7 +112,7 @@ describe("preparePayment", () => {
       estimatedFee: "0.12",
       estimatedEtaSeconds: 120,
       nonce: "42",
-      deadline: "2026-07-02T14:45:00.000Z",
+      deadline: "2026-07-02T14:35:00.000Z",
       purpose: "design bounty",
       approvalPhrase: "APPROVE pay_123",
     });
@@ -196,6 +204,98 @@ describe("preparePayment", () => {
       purpose: "same-chain payout",
       approvalPhrase: "APPROVE pay_direct",
     });
+  });
+
+  it("returns canonical owner typed data for a trusted tenant session", async () => {
+    const result = await preparePayment(
+      {
+        recipientAddress: "0x1111111111111111111111111111111111111111",
+        destinationChainId: 196,
+        destinationTokenSymbol: "USDT0",
+        amountOut: "1",
+        purpose: "tenant review",
+      },
+      {
+        tenantId: "tenant_123",
+        clock: () => new Date("2026-07-02T14:30:00.000Z"),
+        createId: () => "pay_signed",
+        createNonce: () => "99",
+        wallets: {
+          getActiveWallet: async () => ({
+            tenantId: "tenant_123",
+            ownerAddress: "0x2222222222222222222222222222222222222222",
+            accountAddress: "0x3333333333333333333333333333333333333333",
+            homeChainId: 196,
+            executorAddress: "0x4444444444444444444444444444444444444444",
+            status: "ACTIVE",
+          }),
+        },
+        routes: {
+          quotePaymentRoute: async () => {
+            throw new Error("direct route should not call LI.FI");
+          },
+        },
+        balances: {
+          hasSufficientTokenBalance: async () => true,
+        },
+        paymentIntents: {
+          createPaymentIntent: async () => undefined,
+        },
+      },
+    );
+
+    assert.equal(result.authorization?.primaryType, "DirectPaymentAuthorization");
+    assert.equal((result.authorization?.message as { amount?: string } | undefined)?.amount, "1000000");
+    assert.equal(result.authorizationHash?.length, 66);
+    assert.match(result.instructionToAgent, /Review & Sign/);
+    assert.doesNotMatch(result.instructionToAgent, /APPROVE pay_signed/);
+  });
+
+  it("creates a durable Review & Sign URL only for a configured tenant handoff", async () => {
+    const handoffs: unknown[] = [];
+    const reviewToken = `apr_${"a".repeat(43)}`;
+    const result = await preparePayment(
+      {
+        recipientAddress: "0x1111111111111111111111111111111111111111",
+        destinationChainId: 196,
+        destinationTokenSymbol: "USDT0",
+        amountOut: "1",
+        purpose: "review handoff",
+      },
+      {
+        tenantId: "tenant_123",
+        setupWebUrl: "https://wallet.agentpay.site/setup",
+        reviewTokenSecret: "review-secret-012345678901234567890123",
+        createReviewToken: () => reviewToken,
+        clock: () => new Date("2026-07-02T14:30:00.000Z"),
+        createId: () => "pay_review",
+        createNonce: () => "100",
+        wallets: {
+          getActiveWallet: async () => ({
+            tenantId: "tenant_123",
+            ownerAddress: "0x2222222222222222222222222222222222222222",
+            accountAddress: "0x3333333333333333333333333333333333333333",
+            homeChainId: 196,
+            executorAddress: "0x4444444444444444444444444444444444444444",
+            status: "ACTIVE",
+          }),
+        },
+        routes: { quotePaymentRoute: async () => { throw new Error("direct route should not call LI.FI"); } },
+        balances: { hasSufficientTokenBalance: async () => true },
+        paymentIntents: { createPaymentIntent: async () => undefined },
+        paymentReviews: {
+          async createPaymentReviewHandoff(record) { handoffs.push(record); },
+          async getPaymentReviewHandoffByTokenDigest() { return null; },
+          async getPaymentReviewHandoff() { return null; },
+          async attachPaymentReviewSignature() { return { status: "CONFLICT" as const }; },
+        },
+      },
+    );
+
+    assert.match(result.reviewUrl ?? "", /^https:\/\/wallet\.agentpay\.site\/review#review_token=/);
+    assert.match(result.instructionToAgent, /get_payment_signature/);
+    assert.equal(handoffs.length, 1);
+    assert.equal((handoffs[0] as { tokenDigest: string }).tokenDigest, hashPaymentReviewToken(reviewToken, "review-secret-012345678901234567890123"));
   });
 
   it("persists parser-provided invoice and x402 payment types for audit history", async () => {

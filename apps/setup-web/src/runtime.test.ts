@@ -22,6 +22,7 @@ describe("parseSetupWebEnv", () => {
       SETUP_DEPLOYER_PRIVATE_KEY: ` ${validPrivateKey} `,
       AGENTPAY_ACCOUNT_BYTECODE: " 0x60006000 ",
       SETUP_WEB_PORT: " 3333 ",
+      AGENTPAY_REVIEW_TOKEN_SECRET: " review-token-secret-012345678901234567890123 ",
     });
 
     assert.deepEqual(config, {
@@ -34,7 +35,9 @@ describe("parseSetupWebEnv", () => {
       },
       setupDeployerPrivateKey: validPrivateKey,
       agentPayAccountBytecode: "0x60006000",
+      homeChainId: 1952,
       setupWebPort: 3333,
+      reviewTokenSecret: "review-token-secret-012345678901234567890123",
     });
   });
 
@@ -159,6 +162,63 @@ describe("parseSetupWebEnv", () => {
         assert.doesNotMatch(error.message, /secret-private-key/);
         return true;
       },
+    );
+  });
+
+  it("accepts only the V2 account marker and a 32-byte artifact hash", () => {
+    assert.throws(
+      () =>
+        parseSetupWebEnv({
+          SUPABASE_URL: "https://agentpay.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+          XLAYER_RPC_URL: "https://rpc.xlayer.tech",
+          SETUP_DEPLOYER_PRIVATE_KEY: validPrivateKey,
+          AGENTPAY_ACCOUNT_BYTECODE: "0x60006000",
+          AGENTPAY_ACCOUNT_VERSION: "v1",
+        }),
+      /AGENTPAY_ACCOUNT_VERSION/,
+    );
+    assert.throws(
+      () =>
+        parseSetupWebEnv({
+          SUPABASE_URL: "https://agentpay.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+          XLAYER_RPC_URL: "https://rpc.xlayer.tech",
+          SETUP_DEPLOYER_PRIVATE_KEY: validPrivateKey,
+          AGENTPAY_ACCOUNT_BYTECODE: "0x60006000",
+          AGENTPAY_ACCOUNT_BYTECODE_HASH: "0x1234",
+        }),
+      /AGENTPAY_ACCOUNT_BYTECODE_HASH/,
+    );
+  });
+
+  it("fails closed when the deployment UI is pointed at production", () => {
+    assert.throws(
+      () =>
+        parseSetupWebEnv({
+          AGENTPAY_ENVIRONMENT: "production",
+          SUPABASE_URL: "https://agentpay.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+          XLAYER_RPC_URL: "https://rpc.xlayer.tech",
+          SETUP_DEPLOYER_PRIVATE_KEY: validPrivateKey,
+          AGENTPAY_ACCOUNT_BYTECODE: "0x60006000",
+        }),
+      /production setup deployment surface/i,
+    );
+  });
+
+  it("does not allow an implicit mainnet setup chain", () => {
+    assert.throws(
+      () =>
+        parseSetupWebEnv({
+          SUPABASE_URL: "https://agentpay.supabase.co",
+          SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+          XLAYER_RPC_URL: "https://rpc.xlayer.tech",
+          SETUP_DEPLOYER_PRIVATE_KEY: validPrivateKey,
+          AGENTPAY_ACCOUNT_BYTECODE: "0x60006000",
+          AGENTPAY_HOME_CHAIN_ID: "196",
+        }),
+      /mainnet setup deployment surface/i,
     );
   });
 });
@@ -291,10 +351,10 @@ describe("createSetupWebDependencies", () => {
       {
         ownerAddress: owner.address,
         executorAddress: "0x4444444444444444444444444444444444444444",
-        homeChainId: 196,
+        homeChainId: 1952,
         initialAllowedTokenAddresses: [
-          "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-          "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+          "0x9e29b3AaDa05Bf2D2c827Af80Bd28Dc0b9b4FB0c",
+          "0xcB8BF24c6cE16Ad21D707c9505421a17f2bec79D",
         ],
         initialAllowedRouteTargets: [routeTarget],
       },

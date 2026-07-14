@@ -6,6 +6,7 @@ import {
   createSupabaseAgentPayRepositoriesFromConfig,
   type SupabaseRuntimeConfig,
 } from "@agentpay-ai/mcp-server";
+import type { PaymentReviewRepository } from "@agentpay-ai/mcp-server";
 import {
   configureStableTokenMetadataOverrides,
   type SetupIntentRecord,
@@ -19,6 +20,7 @@ import {
 import {
   completeWalletSetup,
   createEthersSetupSignatureVerifier,
+  DEFAULT_SETUP_HOME_CHAIN_ID,
   type AgentPayAccountDeployer,
   type CompleteWalletSetupDependencies,
   type CompleteWalletSetupOutput,
@@ -33,6 +35,7 @@ const requiredEnvNames = [
 ] as const;
 const privateKeyPattern = /^0x[a-fA-F0-9]{64}$/;
 const hexDataPattern = /^0x(?:[a-fA-F0-9]{2})+$/;
+const bytes32Pattern = /^0x[a-fA-F0-9]{64}$/;
 const addressPattern = /^0x[a-fA-F0-9]{40}$/;
 const setupHomeChainIds = new Set([196, 1952]);
 
@@ -43,6 +46,9 @@ export interface SetupWebRuntimeConfig {
   xlayerRpcUrls?: Partial<Record<number, string>>;
   setupDeployerPrivateKey: string;
   agentPayAccountBytecode: string;
+  accountVersion?: "v2";
+  agentPayAccountBytecodeHash?: string;
+  reviewTokenSecret?: string;
   homeChainId?: number;
   stableTokenOverrides?: StableTokenMetadataOverrides;
   initialAllowedRouteTargets?: string[];
@@ -54,6 +60,11 @@ export interface SetupWebRepositoryBundle {
     getSetupIntent(setupIntentId: string): Promise<SetupIntentRecord | null>;
   };
   wallets: CompleteWalletSetupDependencies["wallets"];
+  tenantBindings?: {
+    bindVerifiedOwner(ownerAddress: string, chainId: number): Promise<{ tenantId: string }>;
+  };
+  paymentReviews?: PaymentReviewRepository;
+  paymentIntents?: NonNullable<SetupWebDependencies["paymentIntents"]>;
 }
 
 export interface SetupWebRuntimeOptions {
@@ -90,10 +101,14 @@ export function parseSetupWebEnv(env: NodeJS.ProcessEnv | Record<string, string 
     Object.entries(env).map(([key, value]) => [key, value?.trim() === "" ? undefined : value?.trim()]),
   ) as Record<string, string | undefined>;
   const bytecode = normalized.AGENTPAY_ACCOUNT_BYTECODE ?? readBytecode(normalized.AGENTPAY_ACCOUNT_BYTECODE_PATH);
+  const accountVersion = normalized.AGENTPAY_ACCOUNT_VERSION ?? "v2";
+  const agentPayAccountBytecodeHash = normalized.AGENTPAY_ACCOUNT_BYTECODE_HASH;
   const initialAllowedRouteTargets = parseAddressList(normalized.AGENTPAY_INITIAL_ROUTE_TARGETS);
-  const homeChainId = parseOptionalHomeChainId(normalized.AGENTPAY_HOME_CHAIN_ID);
+  const parsedHomeChainId = parseOptionalHomeChainId(normalized.AGENTPAY_HOME_CHAIN_ID);
+  const homeChainId = parsedHomeChainId ?? DEFAULT_SETUP_HOME_CHAIN_ID;
   const xlayerRpcUrls = parseXLayerRpcUrls(normalized);
   const stableTokenOverrides = parseStableTokenOverrides(normalized);
+  const productionEnvironment = normalized.AGENTPAY_ENVIRONMENT === "production";
   const missing = [
     ...requiredEnvNames.filter((name) => !normalized[name]),
     !bytecode ? "AGENTPAY_ACCOUNT_BYTECODE" : undefined,
@@ -111,11 +126,20 @@ export function parseSetupWebEnv(env: NodeJS.ProcessEnv | Record<string, string 
       ? "SETUP_DEPLOYER_PRIVATE_KEY"
       : undefined,
     bytecode && !hexDataPattern.test(bytecode) ? "AGENTPAY_ACCOUNT_BYTECODE" : undefined,
+    accountVersion !== "v2" ? "AGENTPAY_ACCOUNT_VERSION" : undefined,
+    agentPayAccountBytecodeHash && !bytes32Pattern.test(agentPayAccountBytecodeHash)
+      ? "AGENTPAY_ACCOUNT_BYTECODE_HASH"
+      : undefined,
+    normalized.AGENTPAY_REVIEW_TOKEN_SECRET && normalized.AGENTPAY_REVIEW_TOKEN_SECRET.length < 32
+      ? "AGENTPAY_REVIEW_TOKEN_SECRET"
+      : undefined,
     initialAllowedRouteTargets.some((target) => !addressPattern.test(target))
       ? "AGENTPAY_INITIAL_ROUTE_TARGETS"
       : undefined,
-    normalized.AGENTPAY_HOME_CHAIN_ID && !homeChainId ? "AGENTPAY_HOME_CHAIN_ID" : undefined,
+    normalized.AGENTPAY_HOME_CHAIN_ID && !parsedHomeChainId ? "AGENTPAY_HOME_CHAIN_ID" : undefined,
+    parsedHomeChainId === 196 ? "mainnet setup deployment surface" : undefined,
     normalized.SETUP_WEB_PORT && !isPort(normalized.SETUP_WEB_PORT) ? "SETUP_WEB_PORT" : undefined,
+    productionEnvironment ? "production setup deployment surface" : undefined,
     ...validateStableTokenOverrideAddresses(normalized),
   ].filter((name): name is string => Boolean(name));
 
@@ -130,6 +154,9 @@ export function parseSetupWebEnv(env: NodeJS.ProcessEnv | Record<string, string 
     xlayerRpcUrls,
     setupDeployerPrivateKey: normalized.SETUP_DEPLOYER_PRIVATE_KEY,
     agentPayAccountBytecode: bytecode,
+    accountVersion: normalized.AGENTPAY_ACCOUNT_VERSION ? "v2" : undefined,
+    agentPayAccountBytecodeHash,
+    reviewTokenSecret: normalized.AGENTPAY_REVIEW_TOKEN_SECRET,
     homeChainId,
     stableTokenOverrides,
     initialAllowedRouteTargets: initialAllowedRouteTargets.length > 0 ? initialAllowedRouteTargets : undefined,
@@ -154,6 +181,8 @@ export function createSetupWebDependencies(
     rpcUrls: config.xlayerRpcUrls,
     deployerPrivateKey: config.setupDeployerPrivateKey,
     bytecode: config.agentPayAccountBytecode,
+    ...(config.accountVersion ? { accountVersion: config.accountVersion } : {}),
+    ...(config.agentPayAccountBytecodeHash ? { bytecodeHash: config.agentPayAccountBytecodeHash } : {}),
   });
   const completeDependencies: CompleteWalletSetupDependencies = {
     setupIntents: repositories.setupIntents,
@@ -163,6 +192,7 @@ export function createSetupWebDependencies(
     clock: options.clock ?? (() => new Date()),
     homeChainId: config.homeChainId,
     initialAllowedRouteTargets: config.initialAllowedRouteTargets,
+    bindVerifiedOwner: repositories.tenantBindings?.bindVerifiedOwner,
   };
 
   return {
@@ -173,6 +203,9 @@ export function createSetupWebDependencies(
       return completeWalletSetup(input, completeDependencies);
     },
     clock: completeDependencies.clock,
+    paymentReviews: repositories.paymentReviews,
+    paymentIntents: repositories.paymentIntents,
+    reviewTokenSecret: config.reviewTokenSecret ?? config.serviceRoleKey,
   };
 }
 

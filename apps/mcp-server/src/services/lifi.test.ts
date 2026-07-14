@@ -30,6 +30,7 @@ describe("createLifiRouteQuoteProvider", () => {
             estimate: {
               fromAmount: "10200000",
               toAmount: "10170000",
+              toAmountMin: "10150000",
               gasCosts: [
                 {
                   amountUSD: "0.12",
@@ -77,6 +78,8 @@ describe("createLifiRouteQuoteProvider", () => {
     assert.equal(quote.sourceTokenAddress, "0x5555555555555555555555555555555555555555");
     assert.equal(quote.destinationTokenAddress, "0x6666666666666666666666666666666666666666");
     assert.equal(quote.maxAmountIn, "10.2");
+    assert.equal(quote.nativeValue, "0");
+    assert.equal(quote.minAmountOut, "10.15");
     assert.equal(quote.maxNativeFee, "0");
     assert.equal(quote.routeTarget, "0x7777777777777777777777777777777777777777");
     assert.equal(quote.routeCalldata, "0x1234");

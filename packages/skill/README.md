@@ -8,13 +8,13 @@ This package contains the AgentPay `SKILL.md` and OpenAI metadata used by `npx @
 npx @agentpay-ai/agentpay install
 ```
 
-After installation, users should return to their agent chat and ask for wallet creation or payment there. The agent uses AgentPay MCP tools to create setup links, prepare payments, request exact approval phrases, execute after approval, and track status.
+After installation, users should return to their agent chat and ask for wallet creation or payment there. The agent uses AgentPay MCP tools to create setup links, prepare payments, send the owner to Review & Sign for an EIP-712 authorization, execute with the resulting signature, and track status.
 
 ## Contents
 
-- `SKILL.md` defines AgentPay payment, setup, approval, and safety workflows.
+- `SKILL.md` defines AgentPay payment, setup, Review & Sign, and safety workflows.
 - `agents/openai.yaml` provides Codex/OpenAI agent metadata.
 
 ## Safety Notes
 
-The skill requires exact human approval phrases before payment execution, keeps wallet setup separate from payment approval, and instructs agents not to expose secrets.
+The skill requires a verified human owner EIP-712 signature before payment execution, keeps wallet setup separate from payment authorization, and instructs agents not to expose secrets. Exact approval phrases are migration-only.

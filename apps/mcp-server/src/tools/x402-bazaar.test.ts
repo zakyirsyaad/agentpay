@@ -107,7 +107,7 @@ describe("prepareX402ServiceRequestForAgent", () => {
     });
     assert.equal(output.paymentRequired?.resource.url, "https://api.market.example.com/prices?symbol=ETH-USDT");
     assert.match(output.instructionToAgent, /parse_x402_payment_required/);
-    assert.match(output.instructionToAgent, /exact approval/i);
+    assert.match(output.instructionToAgent, /Review & Sign/i);
   });
 
   it("asks for missing request parameters before payment preparation", async () => {

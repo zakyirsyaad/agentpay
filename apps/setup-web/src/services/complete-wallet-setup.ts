@@ -8,7 +8,10 @@ import {
   type SetupIntentRecord,
 } from "@agentpay-ai/shared";
 
+const MAINNET_USDT0_ADDRESS = "0x779Ded0c9e1022225f8E0630b35a9b54bE713736";
+
 export interface AgentWalletRecord {
+  tenantId?: string;
   ownerAddress: string;
   accountAddress: string;
   homeChainId: number;
@@ -18,7 +21,7 @@ export interface AgentWalletRecord {
 
 export interface SetupCompletionSetupIntentRepository {
   getSetupIntent(setupIntentId: string): Promise<SetupIntentRecord | null>;
-  markSetupSigned(setupIntentId: string, ownerAddress: string, signature: string): Promise<void>;
+  markSetupSigned(setupIntentId: string, ownerAddress: string, signature: string, tenantId?: string): Promise<void>;
   markSetupCompleted(setupIntentId: string, accountAddress: string, completedAt: string): Promise<void>;
   markSetupExpired(setupIntentId: string): Promise<void>;
   markSetupFailed(setupIntentId: string, errorCode: string, errorMessage: string): Promise<void>;
@@ -58,6 +61,7 @@ export interface CompleteWalletSetupDependencies {
   homeChainId?: number;
   initialAllowedTokenAddresses?: string[];
   initialAllowedRouteTargets?: string[];
+  bindVerifiedOwner?: (ownerAddress: string, homeChainId: number) => Promise<{ tenantId: string }>;
 }
 
 export interface CompleteWalletSetupOutput {
@@ -68,6 +72,8 @@ export interface CompleteWalletSetupOutput {
   deploymentTxHash?: string;
   completedAt: string;
 }
+
+export const DEFAULT_SETUP_HOME_CHAIN_ID = 1952;
 
 export async function completeWalletSetup(
   rawInput: CompleteWalletSetupInput,
@@ -107,21 +113,27 @@ export async function completeWalletSetup(
     throw new Error(message);
   }
 
-  await dependencies.setupIntents.markSetupSigned(intent.id, ownerAddress, input.signature);
-
   try {
-    const homeChainId = intent.homeChainId ?? dependencies.homeChainId ?? 196;
+    const homeChainId = intent.homeChainId ?? dependencies.homeChainId ?? DEFAULT_SETUP_HOME_CHAIN_ID;
+    const initialAllowedTokenAddresses =
+      dependencies.initialAllowedTokenAddresses ?? defaultAllowedTokenAddresses(homeChainId);
+    const initialAllowedRouteTargets = dependencies.initialAllowedRouteTargets ?? [];
+    assertDeploymentAllowlist(homeChainId, initialAllowedTokenAddresses, initialAllowedRouteTargets);
+    const tenantBinding = dependencies.bindVerifiedOwner
+      ? await dependencies.bindVerifiedOwner(ownerAddress, homeChainId)
+      : undefined;
+    await dependencies.setupIntents.markSetupSigned(intent.id, ownerAddress, input.signature, tenantBinding?.tenantId);
     const deployment = await dependencies.deployer.deployAgentPayAccount({
       ownerAddress,
       executorAddress: intent.executorAddress,
       homeChainId,
-      initialAllowedTokenAddresses:
-        dependencies.initialAllowedTokenAddresses ?? defaultAllowedTokenAddresses(homeChainId),
-      initialAllowedRouteTargets: dependencies.initialAllowedRouteTargets ?? [],
+      initialAllowedTokenAddresses,
+      initialAllowedRouteTargets,
     });
     const completedAt = dependencies.clock().toISOString();
 
     await dependencies.wallets.createAgentWallet({
+      ...(tenantBinding ? { tenantId: tenantBinding.tenantId } : {}),
       ownerAddress,
       accountAddress: deployment.accountAddress,
       homeChainId,
@@ -175,7 +187,23 @@ function sameAddress(left: string, right: string): boolean {
 }
 
 function defaultAllowedTokenAddresses(homeChainId: number): string[] {
-  return DEFAULT_STABLE_TOKEN_SYMBOLS.map((symbol) => getStableTokenAddress(homeChainId, symbol));
+  const symbols = homeChainId === 196 ? (["USDT0"] as const) : DEFAULT_STABLE_TOKEN_SYMBOLS;
+  return symbols.map((symbol) => getStableTokenAddress(homeChainId, symbol));
+}
+
+function assertDeploymentAllowlist(homeChainId: number, tokenAddresses: string[], routeTargets: string[]): void {
+  if (homeChainId !== 196 && homeChainId !== 1952) {
+    throw new Error(`Unsupported AgentPay setup chain ${homeChainId}; only X Layer mainnet (196) and testnet (1952) are allowed.`);
+  }
+  if (homeChainId !== 196) {
+    return;
+  }
+  if (tokenAddresses.length !== 1 || tokenAddresses[0]?.toLowerCase() !== MAINNET_USDT0_ADDRESS.toLowerCase()) {
+    throw new Error("X Layer mainnet setup requires the canonical USDT0 token allowlist only.");
+  }
+  if (routeTargets.length !== 0) {
+    throw new Error("X Layer mainnet setup requires an empty route-target allowlist.");
+  }
 }
 
 function jsonResponse(body: unknown, status: number): Response {
