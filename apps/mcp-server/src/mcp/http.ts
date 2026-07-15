@@ -1531,7 +1531,15 @@ function withDurableExecutionContext(
 function extractPaymentPayer(paymentPayload: PaymentPayload): string | undefined {
   const payload = paymentPayload.payload;
   if (!isRecordValue(payload)) return undefined;
-  const authorization = isRecordValue(payload.authorization) ? payload.authorization : payload;
+  const usesPermit2 = paymentPayload.accepted.extra?.assetTransferMethod === "permit2";
+  const authorization = usesPermit2
+    ? isRecordValue(payload.permit2Authorization)
+      ? payload.permit2Authorization
+      : undefined
+    : isRecordValue(payload.authorization)
+      ? payload.authorization
+      : payload;
+  if (!authorization) return undefined;
   const payer = authorization.from ?? authorization.payer ?? authorization.owner;
   return typeof payer === "string" && /^0x[0-9a-fA-F]{40}$/.test(payer) ? payer.toLowerCase() : undefined;
 }

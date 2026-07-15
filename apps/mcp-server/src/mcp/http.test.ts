@@ -460,7 +460,7 @@ describe("startAgentPayHttpServer", () => {
     }
   });
 
-  it("reserves the canary ledger before settlement and completes it after a successful invoice", async () => {
+  it("accepts a Permit2 payer before reserving and completing the canary lifecycle", async () => {
     const calls: string[] = [];
     const policy = canaryPolicy();
     const ledger = createTestCanaryLedger(calls);
@@ -468,7 +468,7 @@ describe("startAgentPayHttpServer", () => {
       async processHTTPRequest() {
         return {
           type: "payment-verified",
-          paymentPayload: createPaymentPayload(policy.allowlist.payerAddress),
+          paymentPayload: createPermit2PaymentPayload(policy.allowlist.payerAddress),
           paymentRequirements: createCanaryPaymentRequirements(),
         };
       },
@@ -601,6 +601,58 @@ describe("startAgentPayHttpServer", () => {
       assert.deepEqual(await response.json(), {
         error: "Paid payment processor returned no payment proof.",
         code: "PAID_PROCESSOR_PROTOCOL_ERROR",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("fails closed when a verified Permit2 proof omits its payer authorization", async () => {
+    const paymentProcessor = createPaymentProcessor({
+      async processHTTPRequest() {
+        return {
+          type: "payment-verified",
+          paymentPayload: {
+            ...createPaymentPayload(),
+            accepted: {
+              ...createPaymentRequirements(),
+              extra: { assetTransferMethod: "permit2" },
+            },
+          },
+          paymentRequirements: createPaymentRequirements(),
+        };
+      },
+    });
+    const server = await startAgentPayHttpServer({
+      env: mcpEnv(),
+      hostname: "127.0.0.1",
+      port: 0,
+      paymentProcessor,
+      createRuntime() {
+        return createRuntime();
+      },
+    });
+
+    try {
+      const response = await fetch(server.mcpUrl, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "PAYMENT-SIGNATURE": "paid",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "execute_payment", arguments: { paymentIntentId: "pay_permit2_missing_payer", signature: `0x${"11".repeat(65)}` } },
+        }),
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: "Verified payment proof does not identify a payer.",
+        code: "PAID_PAYER_UNBOUND",
       });
     } finally {
       await server.close();
@@ -1934,6 +1986,22 @@ function createPaymentPayload(payer = "0x444444444444444444444444444444444444444
       authorization: {
         from: payer,
       },
+    },
+  };
+}
+
+function createPermit2PaymentPayload(payer: string): PaymentPayload {
+  return {
+    x402Version: 2,
+    accepted: {
+      ...createPaymentRequirements(),
+      extra: { assetTransferMethod: "permit2" },
+    },
+    payload: {
+      permit2Authorization: {
+        from: payer,
+      },
+      signature: `0x${"11".repeat(65)}`,
     },
   };
 }
