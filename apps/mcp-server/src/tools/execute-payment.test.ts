@@ -91,6 +91,7 @@ describe("executePayment", () => {
       typedData.message,
     );
     const executions: unknown[] = [];
+    const mutations: unknown[] = [];
 
     const result = await executePayment(
       { paymentIntentId: intent.id, signature },
@@ -98,8 +99,13 @@ describe("executePayment", () => {
         clock: () => new Date("2026-07-02T14:40:00.000Z"),
         paymentIntents: {
           getPaymentIntent: async () => intent,
-          claimPaymentApproval: async () => true,
-          markPaymentExecuting: async () => undefined,
+          claimPaymentApproval: async (paymentIntentId, approvedAt, tenantId) => {
+            mutations.push({ type: "claim", paymentIntentId, approvedAt, tenantId });
+            return true;
+          },
+          markPaymentExecuting: async (paymentIntentId, sourceTxHash, approvedAt, tenantId) => {
+            mutations.push({ type: "executing", paymentIntentId, sourceTxHash, approvedAt, tenantId });
+          },
           markPaymentFailed: async (_id, code, message) => {
             throw new Error(`${code}: ${message}`);
           },
@@ -136,6 +142,21 @@ describe("executePayment", () => {
     assert.equal(result.sourceTxHash, `0x${"aa".repeat(32)}`);
     assert.equal(executions.length, 1);
     assert.equal((executions[0] as { authorization: { amount: string } }).authorization.amount, "10000000");
+    assert.deepEqual(mutations, [
+      {
+        type: "claim",
+        paymentIntentId: intent.id,
+        approvedAt: "2026-07-02T14:40:00.000Z",
+        tenantId: "tenant_123",
+      },
+      {
+        type: "executing",
+        paymentIntentId: intent.id,
+        sourceTxHash: `0x${"aa".repeat(32)}`,
+        approvedAt: "2026-07-02T14:40:00.000Z",
+        tenantId: "tenant_123",
+      },
+    ]);
   });
 
   it("executes stored route calldata after exact approval and marks intent executing", async () => {

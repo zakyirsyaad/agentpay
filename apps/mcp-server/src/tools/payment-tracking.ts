@@ -43,8 +43,8 @@ export interface SourceTransactionStatusProvider {
 
 export interface TrackPaymentIntentRepository {
   getPaymentIntent(paymentIntentId: string): Promise<PaymentIntentRecord | null>;
-  markPaymentCompleted(paymentIntentId: string, destinationTxHash: string | undefined, completedAt: string): Promise<void>;
-  markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string): Promise<void>;
+  markPaymentCompleted(paymentIntentId: string, destinationTxHash: string | undefined, completedAt: string, tenantId?: string): Promise<void>;
+  markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string, tenantId?: string): Promise<void>;
 }
 
 export interface ListPaymentIntentRepository {
@@ -130,6 +130,7 @@ export async function trackPayment(
         intent.id,
         intent.sourceTxHash,
         dependencies.clock().toISOString(),
+        intent.tenantId,
       );
 
       return {
@@ -143,7 +144,7 @@ export async function trackPayment(
 
     if (sourceStatus.status === "FAILED") {
       const message = sourceOnlyFailedMessage(intent.routeProvider);
-      await dependencies.paymentIntents.markPaymentFailed(intent.id, "SOURCE_TX_FAILED", message);
+      await dependencies.paymentIntents.markPaymentFailed(intent.id, "SOURCE_TX_FAILED", message, intent.tenantId);
 
       return {
         paymentIntentId: intent.id,
@@ -173,6 +174,7 @@ export async function trackPayment(
       intent.id,
       routeStatus.destinationTxHash,
       dependencies.clock().toISOString(),
+      intent.tenantId,
     );
 
     return {
@@ -186,7 +188,7 @@ export async function trackPayment(
 
   if (routeStatus.status === "FAILED" || routeStatus.status === "INVALID") {
     const message = routeStatus.substatusMessage ?? "Payment route failed.";
-    await dependencies.paymentIntents.markPaymentFailed(intent.id, "ROUTE_FAILED", message);
+    await dependencies.paymentIntents.markPaymentFailed(intent.id, "ROUTE_FAILED", message, intent.tenantId);
 
     return {
       paymentIntentId: intent.id,

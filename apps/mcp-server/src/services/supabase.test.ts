@@ -356,6 +356,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
     await repositories.paymentIntents.createPaymentIntent({
       id: "pay_123",
+      tenantId: "tenant_a",
       accountAddress: "0x3333333333333333333333333333333333333333",
       ownerAddress: "0x2222222222222222222222222222222222222222",
       status: "AWAITING_APPROVAL",
@@ -384,6 +385,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     });
 
     assert.deepEqual(query.inserted, {
+      tenant_id: "tenant_a",
       id: "pay_123",
       account_address: "0x3333333333333333333333333333333333333333",
       owner_address: "0x2222222222222222222222222222222222222222",
@@ -413,6 +415,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     });
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_CREATED",
         message: "Payment intent created.",
@@ -468,6 +471,7 @@ describe("createSupabaseAgentPayRepositories", () => {
       "pay_123",
       "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "2026-07-02T14:40:00.000Z",
+      "tenant_a",
     );
 
     assert.deepEqual(query.updated, {
@@ -487,9 +491,11 @@ describe("createSupabaseAgentPayRepositories", () => {
         ],
       ],
       ["eq", ["id", "pay_123"]],
+      ["eq", ["tenant_id", "tenant_a"]],
     ]);
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_EXECUTING",
         message: "Payment execution started.",
@@ -519,6 +525,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     const claimed = await repositories.paymentIntents.claimPaymentApproval(
       "pay_123",
       "2026-07-02T14:40:00.000Z",
+      "tenant_a",
     );
 
     assert.equal(claimed, true);
@@ -537,12 +544,14 @@ describe("createSupabaseAgentPayRepositories", () => {
         ],
       ],
       ["eq", ["id", "pay_123"]],
+      ["eq", ["tenant_id", "tenant_a"]],
       ["eq", ["status", "AWAITING_APPROVAL"]],
       ["select", ["id"]],
       ["maybeSingle", []],
     ]);
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_APPROVED",
         message: "Exact approval phrase accepted.",
@@ -551,6 +560,76 @@ describe("createSupabaseAgentPayRepositories", () => {
         },
       },
     ]);
+  });
+
+  it("binds unscoped public payment approval updates and events to the trusted intent tenant", async () => {
+    const query = new FakePaymentIntentQuery();
+    const eventQuery = new FakePaymentEventQuery();
+    const client = {
+      from(table: string) {
+        if (table === "payment_events") {
+          return eventQuery;
+        }
+
+        assert.equal(table, "payment_intents");
+        return query;
+      },
+    };
+
+    const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
+    const claimed = await repositories.paymentIntents.claimPaymentApproval(
+      "pay_public",
+      "2026-07-15T14:29:54.319Z",
+      "tenant_production",
+    );
+
+    assert.equal(claimed, true);
+    assert.ok(query.calls.some(([name, args]) => name === "eq" && args[0] === "tenant_id" && args[1] === "tenant_production"));
+    assert.deepEqual(eventQuery.inserted, [
+      {
+        tenant_id: "tenant_production",
+        payment_intent_id: "pay_public",
+        event_type: "PAYMENT_APPROVED",
+        message: "Exact approval phrase accepted.",
+        metadata: {
+          approvedAt: "2026-07-15T14:29:54.319Z",
+        },
+      },
+    ]);
+  });
+
+  it("rejects a payment mutation whose trusted tenant conflicts with the consumer session", async () => {
+    const context = createSessionContext({
+      sessionId: "session_tenant_a",
+      tenantId: "tenant_a",
+      ownerAddress: "0x2222222222222222222222222222222222222222",
+      accountAddress: "0x3333333333333333333333333333333333333333",
+      homeChainId: 196,
+      audience: "https://wallet.agentpay.site/mcp",
+      environment: "production",
+      scopes: ["payment:review"],
+      authEpoch: 0,
+      issuedAt: "2026-07-15T14:00:00.000Z",
+      expiresAt: "2026-07-15T15:00:00.000Z",
+    });
+    const client = {
+      from() {
+        throw new Error("mutation must not reach Supabase");
+      },
+    };
+    const repositories = createSupabaseAgentPayRepositories(
+      client as unknown as AgentPaySupabaseClient,
+      context,
+    );
+
+    await assert.rejects(
+      () => repositories.paymentIntents.claimPaymentApproval(
+        "pay_other_tenant",
+        "2026-07-15T14:29:54.319Z",
+        "tenant_b",
+      ),
+      /Resource tenant does not match the consumer session/,
+    );
   });
 
   it("returns false when payment approval was already claimed", async () => {
@@ -572,6 +651,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     const claimed = await repositories.paymentIntents.claimPaymentApproval(
       "pay_123",
       "2026-07-02T14:40:00.000Z",
+      "tenant_a",
     );
 
     assert.equal(claimed, false);
@@ -593,7 +673,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     };
 
     const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
-    await repositories.paymentIntents.markPaymentFailed("pay_123", "EXECUTION_FAILED", "RPC failed");
+    await repositories.paymentIntents.markPaymentFailed("pay_123", "EXECUTION_FAILED", "RPC failed", "tenant_a");
 
     assert.deepEqual(query.updated, {
       status: "FAILED",
@@ -602,6 +682,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     });
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_FAILED",
         message: "RPC failed",
@@ -627,7 +708,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     };
 
     const repositories = createSupabaseAgentPayRepositories(client as unknown as AgentPaySupabaseClient);
-    await repositories.paymentIntents.markPaymentExpired("pay_123");
+    await repositories.paymentIntents.markPaymentExpired("pay_123", "tenant_a");
 
     assert.deepEqual(query.updated, {
       status: "EXPIRED",
@@ -636,6 +717,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     });
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_EXPIRED",
         message: "Payment approval deadline expired.",
@@ -665,6 +747,7 @@ describe("createSupabaseAgentPayRepositories", () => {
       "pay_123",
       "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "2026-07-02T14:43:00.000Z",
+      "tenant_a",
     );
 
     assert.deepEqual(query.updated, {
@@ -674,6 +757,7 @@ describe("createSupabaseAgentPayRepositories", () => {
     });
     assert.deepEqual(eventQuery.inserted, [
       {
+        tenant_id: "tenant_a",
         payment_intent_id: "pay_123",
         event_type: "PAYMENT_COMPLETED",
         message: "Payment completed.",

@@ -16,10 +16,10 @@ import { assertProductionExecutionAllowed, type ExecutionMode } from "../runtime
 
 export interface ExecutePaymentIntentRepository {
   getPaymentIntent(paymentIntentId: string): Promise<PaymentIntentRecord | null>;
-  claimPaymentApproval(paymentIntentId: string, approvedAt: string): Promise<boolean>;
-  markPaymentExecuting(paymentIntentId: string, sourceTxHash: string, approvedAt: string): Promise<void>;
-  markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string): Promise<void>;
-  markPaymentExpired(paymentIntentId: string): Promise<void>;
+  claimPaymentApproval(paymentIntentId: string, approvedAt: string, tenantId?: string): Promise<boolean>;
+  markPaymentExecuting(paymentIntentId: string, sourceTxHash: string, approvedAt: string, tenantId?: string): Promise<void>;
+  markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string, tenantId?: string): Promise<void>;
+  markPaymentExpired(paymentIntentId: string, tenantId?: string): Promise<void>;
 }
 
 export interface TokenBalanceCheckRequest {
@@ -271,7 +271,7 @@ export async function executePayment(
 
   const now = dependencies.clock();
   if (new Date(intent.deadline).getTime() <= now.getTime()) {
-    await dependencies.paymentIntents.markPaymentExpired(intent.id);
+    await dependencies.paymentIntents.markPaymentExpired(intent.id, intent.tenantId);
     throw new Error(`Payment intent ${intent.id} expired.`);
   }
 
@@ -289,12 +289,12 @@ export async function executePayment(
 
   if (!hasBalance) {
     const message = `Insufficient balance for payment intent ${intent.id}.`;
-    await dependencies.paymentIntents.markPaymentFailed(intent.id, "INSUFFICIENT_BALANCE", message);
+    await dependencies.paymentIntents.markPaymentFailed(intent.id, "INSUFFICIENT_BALANCE", message, intent.tenantId);
     throw new Error(message);
   }
 
   const approvedAt = now.toISOString();
-  const claimed = await dependencies.paymentIntents.claimPaymentApproval(intent.id, approvedAt);
+  const claimed = await dependencies.paymentIntents.claimPaymentApproval(intent.id, approvedAt, intent.tenantId);
 
   if (!claimed) {
     throw new Error(`Payment intent ${intent.id} is already being executed or is no longer awaiting approval.`);
@@ -304,7 +304,7 @@ export async function executePayment(
     const execution = await executeStoredIntent(intent, dependencies.executor);
 
     try {
-      await dependencies.paymentIntents.markPaymentExecuting(intent.id, execution.sourceTxHash, approvedAt);
+      await dependencies.paymentIntents.markPaymentExecuting(intent.id, execution.sourceTxHash, approvedAt, intent.tenantId);
     } catch (error) {
       if (durableExecution) {
         throw new DurableExecutionError(
@@ -323,7 +323,7 @@ export async function executePayment(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown execution failure.";
     if (!(error instanceof DurableExecutionError && error.ambiguous)) {
-      await dependencies.paymentIntents.markPaymentFailed(intent.id, "EXECUTION_FAILED", message);
+      await dependencies.paymentIntents.markPaymentFailed(intent.id, "EXECUTION_FAILED", message, intent.tenantId);
     }
     throw error;
   }
@@ -359,7 +359,7 @@ export async function executeAuthorizedPayment(
 
   const now = dependencies.clock();
   if (new Date(intent.deadline).getTime() <= now.getTime()) {
-    await dependencies.paymentIntents.markPaymentExpired(intent.id);
+    await dependencies.paymentIntents.markPaymentExpired(intent.id, intent.tenantId);
     throw new Error(`Payment intent ${intent.id} expired.`);
   }
 
@@ -387,12 +387,12 @@ export async function executeAuthorizedPayment(
   });
   if (!hasBalance) {
     const message = `Insufficient balance for payment intent ${intent.id}.`;
-    await dependencies.paymentIntents.markPaymentFailed(intent.id, "INSUFFICIENT_BALANCE", message);
+    await dependencies.paymentIntents.markPaymentFailed(intent.id, "INSUFFICIENT_BALANCE", message, intent.tenantId);
     throw new Error(message);
   }
 
   const approvedAt = now.toISOString();
-  const claimed = await dependencies.paymentIntents.claimPaymentApproval(intent.id, approvedAt);
+  const claimed = await dependencies.paymentIntents.claimPaymentApproval(intent.id, approvedAt, intent.tenantId);
   if (!claimed) {
     throw new Error(`Payment intent ${intent.id} is already being executed or is no longer awaiting approval.`);
   }
@@ -417,7 +417,7 @@ export async function executeAuthorizedPayment(
         });
 
     try {
-      await dependencies.paymentIntents.markPaymentExecuting(intent.id, execution.sourceTxHash, approvedAt);
+      await dependencies.paymentIntents.markPaymentExecuting(intent.id, execution.sourceTxHash, approvedAt, intent.tenantId);
     } catch (error) {
       if (durableExecution) {
         throw new DurableExecutionError(
@@ -435,7 +435,7 @@ export async function executeAuthorizedPayment(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown execution failure.";
     if (!(error instanceof DurableExecutionError && error.ambiguous)) {
-      await dependencies.paymentIntents.markPaymentFailed(intent.id, "EXECUTION_FAILED", message);
+      await dependencies.paymentIntents.markPaymentFailed(intent.id, "EXECUTION_FAILED", message, intent.tenantId);
     }
     throw error;
   }

@@ -175,6 +175,7 @@ interface PaymentIntentRow {
 
 interface PaymentEventRow {
   id: string;
+  tenant_id: string;
   payment_intent_id: string;
   event_type: string;
   message: string | null;
@@ -623,6 +624,7 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
     paymentIntents: {
       async createPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
         assertWalletOwnership(tenantContext, intent.ownerAddress, intent.accountAddress);
+        const boundTenantId = resolvePaymentTenantId(tenantContext, intent.tenantId);
         const { error } = await client.from("payment_intents").insert(toPaymentIntentRow(intent, tenantContext));
 
         if (error) {
@@ -635,7 +637,7 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
           destinationChainId: intent.destinationChainId,
           destinationTokenSymbol: intent.destinationTokenSymbol,
           recipientAddress: intent.recipientAddress,
-        }, tenantContext);
+        }, boundTenantId);
       },
       async getPaymentIntent(paymentIntentId: string): Promise<PaymentIntentRecord | null> {
         let query = client.from("payment_intents").select("*").eq("id", paymentIntentId);
@@ -653,7 +655,8 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
 
         return data ? toPaymentIntentRecord(data) : null;
       },
-      async claimPaymentApproval(paymentIntentId: string, approvedAt: string): Promise<boolean> {
+      async claimPaymentApproval(paymentIntentId: string, approvedAt: string, tenantId?: string): Promise<boolean> {
+        const boundTenantId = resolvePaymentTenantId(tenantContext, tenantId);
         let query = client
           .from("payment_intents")
           .update({
@@ -661,6 +664,7 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
             approved_at: approvedAt,
           })
           .eq("id", paymentIntentId)
+          .eq("tenant_id", boundTenantId)
           .eq("status", "AWAITING_APPROVAL")
           .select("id");
 
@@ -682,48 +686,53 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
 
         await insertPaymentEvent(client, paymentIntentId, "PAYMENT_APPROVED", "Exact approval phrase accepted.", {
           approvedAt,
-        }, tenantContext);
+        }, boundTenantId);
 
         return true;
       },
-      async markPaymentExecuting(paymentIntentId: string, sourceTxHash: string, approvedAt: string): Promise<void> {
+      async markPaymentExecuting(paymentIntentId: string, sourceTxHash: string, approvedAt: string, tenantId?: string): Promise<void> {
+        const boundTenantId = resolvePaymentTenantId(tenantContext, tenantId);
         await updatePaymentIntent(client, paymentIntentId, {
           status: "EXECUTING",
           source_tx_hash: sourceTxHash,
           approved_at: approvedAt,
-        }, tenantContext);
+        }, tenantContext, boundTenantId);
         await insertPaymentEvent(client, paymentIntentId, "PAYMENT_EXECUTING", "Payment execution started.", {
           sourceTxHash,
           approvedAt,
-        }, tenantContext);
+        }, boundTenantId);
       },
-      async markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string): Promise<void> {
+      async markPaymentFailed(paymentIntentId: string, errorCode: string, errorMessage: string, tenantId?: string): Promise<void> {
+        const boundTenantId = resolvePaymentTenantId(tenantContext, tenantId);
         await updatePaymentIntent(client, paymentIntentId, {
           status: "FAILED",
           error_code: errorCode,
           error_message: errorMessage,
-        }, tenantContext);
+        }, tenantContext, boundTenantId);
         await insertPaymentEvent(client, paymentIntentId, "PAYMENT_FAILED", errorMessage, {
           errorCode,
-        }, tenantContext);
+        }, boundTenantId);
       },
-      async markPaymentExpired(paymentIntentId: string): Promise<void> {
+      async markPaymentExpired(paymentIntentId: string, tenantId?: string): Promise<void> {
+        const boundTenantId = resolvePaymentTenantId(tenantContext, tenantId);
         const errorMessage = "Payment approval deadline expired.";
 
         await updatePaymentIntent(client, paymentIntentId, {
           status: "EXPIRED",
           error_code: "DEADLINE_EXPIRED",
           error_message: errorMessage,
-        }, tenantContext);
+        }, tenantContext, boundTenantId);
         await insertPaymentEvent(client, paymentIntentId, "PAYMENT_EXPIRED", errorMessage, {
           errorCode: "DEADLINE_EXPIRED",
-        }, tenantContext);
+        }, boundTenantId);
       },
       async markPaymentCompleted(
         paymentIntentId: string,
         destinationTxHash: string | undefined,
         completedAt: string,
+        tenantId?: string,
       ): Promise<void> {
+        const boundTenantId = resolvePaymentTenantId(tenantContext, tenantId);
         await updatePaymentIntent(
           client,
           paymentIntentId,
@@ -733,11 +742,12 @@ function createRepositoryBundle(client: AgentPaySupabaseClient, tenantContext?: 
             completed_at: completedAt,
           }),
           tenantContext,
+          boundTenantId,
         );
         await insertPaymentEvent(client, paymentIntentId, "PAYMENT_COMPLETED", "Payment completed.", {
           destinationTxHash,
           completedAt,
-        }, tenantContext);
+        }, boundTenantId);
       },
       async listPaymentIntents(request: { limit: number }): Promise<PaymentIntentRecord[]> {
         let query = client
@@ -2315,11 +2325,14 @@ async function updatePaymentIntent(
   paymentIntentId: string,
   row: Record<string, unknown>,
   tenantContext?: SessionContext,
+  tenantId?: string,
 ): Promise<void> {
   let query = client.from("payment_intents").update(row).eq("id", paymentIntentId);
+  if (tenantId) {
+    query = query.eq("tenant_id", tenantId);
+  }
   if (tenantContext) {
     query = query
-      .eq("tenant_id", tenantContext.tenantId)
       .eq("owner_address", tenantContext.ownerAddress)
       .eq("account_address", tenantContext.accountAddress);
   }
@@ -2336,10 +2349,10 @@ async function insertPaymentEvent(
   eventType: string,
   message: string,
   metadata: Record<string, unknown>,
-  tenantContext?: SessionContext,
+  tenantId: string,
 ): Promise<void> {
   const { error } = await client.from("payment_events").insert({
-    ...(tenantContext ? { tenant_id: tenantContext.tenantId } : {}),
+    tenant_id: tenantId,
     payment_intent_id: paymentIntentId,
     event_type: eventType,
     message,
@@ -2349,6 +2362,18 @@ async function insertPaymentEvent(
   if (error) {
     throw new Error(`Failed to create payment event for ${paymentIntentId}: ${error.message}`);
   }
+}
+
+function resolvePaymentTenantId(tenantContext: SessionContext | undefined, tenantId: string | undefined): string {
+  assertTenantId(tenantContext, tenantId);
+  const boundTenantId = tenantContext?.tenantId ?? tenantId;
+  if (!boundTenantId) {
+    throw new AgentPayAuthError(
+      "TENANT_RESOURCE_MISMATCH",
+      "Payment mutation requires a trusted tenant binding.",
+    );
+  }
+  return boundTenantId;
 }
 
 async function updateSetupIntent(
