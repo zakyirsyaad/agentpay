@@ -21,12 +21,18 @@ import { authenticateServiceSession, type AuthChallengeStore, type ServiceSessio
 import type { SiweChallenge } from "../auth/siwe.ts";
 import type { AgentPayRuntime } from "../runtime/agentpay-runtime.ts";
 import { DEFAULT_CANARY_CAPS } from "../runtime/paid-execution-canary.ts";
+import { parseAgentPayEnv } from "../runtime/agentpay-runtime.ts";
+import type { RuntimeEnvironmentIdentity } from "../runtime/production-readiness.ts";
 import type { CanaryLedgerStore } from "../runtime/paid-execution-canary-ledger.ts";
 import { createInMemoryInvoiceExecutionOutboxStore } from "../services/paid-execution-outbox.ts";
 import { createInMemoryPaidExecutionLifecycleStore } from "../services/paid-execution-lifecycle.ts";
 import type { PaymentIntentRecord } from "@agentpay-ai/shared";
 import type { AgentPayMcpPaymentProcessor } from "./okx-agent-payment.ts";
-import { startAgentPayHttpServer } from "./http.ts";
+import {
+  resolveProductionReadiness,
+  shouldVerifyMainnetAccountAtStartup,
+  startAgentPayHttpServer,
+} from "./http.ts";
 import type { ConnectableAgentPayMcpServer } from "./stdio.ts";
 
 describe("startAgentPayHttpServer", () => {
@@ -1079,6 +1085,72 @@ describe("startAgentPayHttpServer", () => {
     }
   });
 
+  it("skips historical account verification only in OFF mode", () => {
+    assert.equal(shouldVerifyMainnetAccountAtStartup("OFF"), false);
+    assert.equal(shouldVerifyMainnetAccountAtStartup("CANARY"), true);
+    assert.equal(shouldVerifyMainnetAccountAtStartup("PUBLIC"), true);
+    assert.equal(shouldVerifyMainnetAccountAtStartup("DRAIN"), true);
+    assert.equal(shouldVerifyMainnetAccountAtStartup(undefined), true);
+  });
+
+  it("skips the historical account scan only when the effective production mode is OFF", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentpay-off-readiness-test-"));
+    const manifestPath = join(directory, "activated.json");
+    const manifest = JSON.parse(
+      await readFile(new URL("../../../../ops/manifests/xlayer-mainnet.activated.json", import.meta.url), "utf8"),
+    ) as Record<string, any>;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const resolve = async (
+      identityMode: "OFF" | "PUBLIC" | null,
+      environmentMode: "OFF" | "PUBLIC" | " OFF " | "   ",
+    ) => {
+      let verificationCalls = 0;
+      const env = {
+        ...productionMcpEnv(),
+        AGENTPAY_MAINNET_MANIFEST_PATH: manifestPath,
+        AGENTPAY_EXECUTION_MODE: environmentMode,
+      };
+      const readiness = await resolveProductionReadiness(
+        parseAgentPayEnv(env),
+        env,
+        undefined,
+        {
+          loadRuntimeIdentity: async () => identityMode
+            ? productionIdentityFor(manifest, identityMode)
+            : null,
+          verifyAccount: async () => {
+            verificationCalls += 1;
+            return { valid: false, checks: {}, errors: ["test verifier"] };
+          },
+        },
+      );
+      return { readiness, verificationCalls };
+    };
+
+    try {
+      const off = await resolve("OFF", "OFF");
+      assert.equal(off.verificationCalls, 0);
+      assert.equal(off.readiness.executionAllowed, false);
+
+      const environmentPublic = await resolve(null, "PUBLIC");
+      assert.equal(environmentPublic.verificationCalls, 1);
+
+      const paddedEnvironmentOff = await resolve(null, " OFF ");
+      assert.equal(paddedEnvironmentOff.verificationCalls, 0);
+      assert.equal(paddedEnvironmentOff.readiness.mode, "OFF");
+
+      const blankEnvironmentOff = await resolve(null, "   ");
+      assert.equal(blankEnvironmentOff.verificationCalls, 0);
+      assert.equal(blankEnvironmentOff.readiness.mode, "OFF");
+
+      const identityPublic = await resolve("PUBLIC", "OFF");
+      assert.equal(identityPublic.verificationCalls, 1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("loads an explicit production manifest path for the published package layout", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agentpay-manifest-test-"));
     const manifestPath = join(directory, "shadow.json");
@@ -1577,6 +1649,45 @@ function productionMcpEnv(): Record<string, string> {
     AGENTPAY_SESSION_HASH_KEY: "s".repeat(64),
     AGENTPAY_REVIEW_TOKEN_SECRET: "r".repeat(64),
     SETUP_WEB_URL: "https://setup.agentpay.site/review",
+  };
+}
+
+function productionIdentityFor(
+  manifest: Record<string, any>,
+  executionMode: "OFF" | "PUBLIC",
+): RuntimeEnvironmentIdentity {
+  return {
+    id: 1,
+    environment: "production",
+    chainId: 196,
+    caip2: "eip155:196",
+    supabaseProjectRef: manifest.database.projectRef,
+    migrationHead: manifest.database.migrationHead,
+    releaseCommit: manifest.release.commit,
+    manifestSha256: "f".repeat(64),
+    accountVersion: "v2",
+    accountAddress: manifest.contract.address,
+    deploymentTxHash: manifest.contract.deploymentTxHash,
+    creationBytecodeHash: manifest.contract.creationBytecodeHash,
+    runtimeBytecodeHash: manifest.contract.runtimeBytecodeHash,
+    abiSha256: manifest.release.abiSha256,
+    ownerAddress: manifest.contract.ownerAddress,
+    executorAddress: manifest.contract.executorAddress,
+    deployerAddress: manifest.contract.deployerAddress,
+    eip712VerifyingContract: manifest.contract.domain.verifyingContract,
+    tokenAddress: manifest.token.address,
+    tokenCodeHash: manifest.token.codeHash,
+    tokenDecimals: manifest.token.decimals,
+    x402Network: manifest.x402.network,
+    x402Asset: manifest.x402.tokenAddress,
+    x402Price: manifest.x402.price,
+    x402PriceAtomic: manifest.x402.priceAtomic,
+    x402SyncSettle: manifest.x402.syncSettle,
+    x402Enabled: manifest.x402.enabled,
+    payToAddress: null,
+    facilitatorRef: null,
+    executionMode,
+    status: manifest.status,
   };
 }
 

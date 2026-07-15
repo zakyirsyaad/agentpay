@@ -25,11 +25,15 @@ import {
   MAINNET_CAIP2,
   MAINNET_CHAIN_ID,
   MAINNET_USDT0_ADDRESS,
+  type ExecutionMode,
   type ProductionReadinessResult,
+  type RuntimeEnvironmentIdentity,
 } from "../runtime/production-readiness.ts";
 import {
   createEthersMainnetAccountVerificationReader,
   verifyMainnetAccount,
+  type MainnetAccountVerificationExpected,
+  type MainnetAccountVerificationResult,
 } from "../services/mainnet-account-verifier.ts";
 
 import {
@@ -115,6 +119,21 @@ export interface StartAgentPayHttpServerOptions {
   consumerAuth?: ConsumerSessionAuthenticator;
   sessionApi?: ConsumerSessionApi;
   oauthApi?: ConsumerOAuthApi;
+}
+
+/** @internal Dependency seam for resolver tests; production callers use the pinned defaults. */
+export interface ResolveProductionReadinessDependencies {
+  loadRuntimeIdentity?: () => Promise<RuntimeEnvironmentIdentity | null>;
+  verifyAccount?: (expected: MainnetAccountVerificationExpected) => Promise<MainnetAccountVerificationResult>;
+}
+
+/**
+ * OFF is a hard execution gate, so its liveness path must not wait for the
+ * historical allowlist scan. Every mode that may later serve an executable
+ * surface retains the complete on-chain verifier.
+ */
+export function shouldVerifyMainnetAccountAtStartup(requestedMode: ExecutionMode | undefined): boolean {
+  return requestedMode !== "OFF";
 }
 
 export async function startAgentPayHttpServer(options: StartAgentPayHttpServerOptions = {}): Promise<AgentPayHttpServer> {
@@ -2048,10 +2067,11 @@ function withReadinessError(readiness: ProductionReadinessResult, error: string)
   };
 }
 
-async function resolveProductionReadiness(
+export async function resolveProductionReadiness(
   config: AgentPayRuntimeConfig,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   canary?: { canaryLedger?: CanaryLedgerStore; canaryPolicy?: CanaryPolicy },
+  dependencies: ResolveProductionReadinessDependencies = {},
 ): Promise<ProductionReadinessResult> {
   let manifest: any;
   try {
@@ -2076,18 +2096,22 @@ async function resolveProductionReadiness(
   const extraErrors: string[] = [];
   if (manifest.status !== "SHADOW_ONLY") {
     try {
-      const repositories = createSupabaseAgentPayRepositoriesFromConfig({
-        supabaseUrl: config.supabaseUrl,
-        serviceRoleKey: config.serviceRoleKey,
-      });
-      identity = await repositories.runtimeEnvironment.getIdentity();
+      identity = await (dependencies.loadRuntimeIdentity ?? (() => {
+        const repositories = createSupabaseAgentPayRepositoriesFromConfig({
+          supabaseUrl: config.supabaseUrl,
+          serviceRoleKey: config.serviceRoleKey,
+        });
+        return repositories.runtimeEnvironment.getIdentity();
+      }))();
     } catch {
       extraErrors.push("runtime identity: singleton identity could not be read");
     }
   }
 
+  const requestedMode = identity?.executionMode ?? config.executionMode ?? manifest.executionMode;
   const contract = manifest.contract as Record<string, unknown> | undefined;
   if (
+    shouldVerifyMainnetAccountAtStartup(requestedMode) &&
     typeof contract?.address === "string" &&
     typeof contract.deploymentTxHash === "string" &&
     typeof contract.runtimeBytecodeHash === "string" &&
@@ -2095,8 +2119,7 @@ async function resolveProductionReadiness(
     typeof contract.executorAddress === "string"
   ) {
     try {
-      const reader = createEthersMainnetAccountVerificationReader(config.xlayerRpcUrl);
-      accountVerification = await verifyMainnetAccount(reader, {
+      const expected: MainnetAccountVerificationExpected = {
         accountAddress: contract.address,
         deploymentTxHash: contract.deploymentTxHash,
         creationBytecodeHash: String(contract.creationBytecodeHash ?? ""),
@@ -2106,7 +2129,11 @@ async function resolveProductionReadiness(
         tokenAddress: manifest.token.address,
         tokenCodeHash: manifest.token.codeHash,
         tokenDecimals: manifest.token.decimals,
-      });
+      };
+      accountVerification = await (dependencies.verifyAccount ?? ((input) => {
+        const reader = createEthersMainnetAccountVerificationReader(config.xlayerRpcUrl);
+        return verifyMainnetAccount(reader, input);
+      }))(expected);
     } catch {
       extraErrors.push("mainnet account: read-only verification could not be completed");
     }
@@ -2120,7 +2147,6 @@ async function resolveProductionReadiness(
   }
 
   let canaryAdmissionReady: boolean | undefined;
-  const requestedMode = identity?.executionMode ?? manifest.executionMode ?? env.AGENTPAY_EXECUTION_MODE;
   if (requestedMode === "CANARY") {
     if (!canary?.canaryLedger || !canary.canaryPolicy) {
       extraErrors.push("canary admission: durable ledger or frozen allowlist is unavailable");
@@ -2141,7 +2167,12 @@ async function resolveProductionReadiness(
   }
 
   const result = await evaluateProductionReadiness({
-    env: Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value?.trim()])),
+    env: Object.fromEntries(
+      Object.entries(env).map(([key, value]) => {
+        const normalized = value?.trim();
+        return [key, normalized === "" ? undefined : normalized];
+      }),
+    ),
     manifest,
     identity,
     accountVerification,
