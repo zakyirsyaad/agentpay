@@ -19,6 +19,13 @@ const expectedPackageNames = new Map([
   ["apps/setup-web", "@agentpay-ai/setup-web"],
   ["packages/cli", "@agentpay-ai/agentpay"],
 ]);
+const expectedVersions = new Map([
+  ["@agentpay-ai/shared", "0.1.4"],
+  ["@agentpay-ai/mcp-server", "0.1.12"],
+  ["@agentpay-ai/setup-web", "0.1.13"],
+  ["@agentpay-ai/skill", "0.1.7"],
+  ["@agentpay-ai/agentpay", "0.1.19"],
+]);
 
 async function readPackageJson(packageDir) {
   const path = join(process.cwd(), packageDir, "package.json");
@@ -52,6 +59,7 @@ describe("publishable AgentPay package manifests", () => {
             expectedPackageNames.get(packageDir),
             `${packageDir} must publish under the ${publishScope} npm org`,
           );
+          assert.equal(manifest.version, expectedVersions.get(manifest.name), `${manifest.name} release version must be exact`);
           return [manifest.name, { packageDir, manifest }];
         }),
       ),
@@ -184,5 +192,17 @@ describe("publishable AgentPay package manifests", () => {
     await access("apps/mcp-server/src/mcp/http.ts");
     await access("apps/mcp-server/src/mcp/okx-agent-payment.ts");
     await access("apps/mcp-server/src/runtime/paid-execution-canary-ledger.ts");
+  });
+
+  it("publishes every production onboarding runtime source", async () => {
+    const shared = await readPackageJson("packages/shared");
+    const mcp = await readPackageJson("apps/mcp-server");
+    const setupWeb = await readPackageJson("apps/setup-web");
+
+    assert.ok(shared.files.includes("src/mainnet-wallet-setup.ts"));
+    assert.ok(mcp.files.includes("src/services/production-setup.ts"));
+    assert.ok(mcp.files.includes("src/services/production-setup-supabase.ts"));
+    assert.ok(setupWeb.files.includes("src/onboarding"));
+    assert.ok(setupWeb.files.includes("src/worker"));
   });
 });

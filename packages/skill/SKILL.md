@@ -25,6 +25,8 @@ The install command only installs/configures the MCP plugin and instructions. It
 
 Default installs connect to the authenticated consumer AgentPay MCP endpoint at `https://wallet.agentpay.site/mcp`. Users do not need Supabase, RPC, executor, deployer, or bytecode config for normal chat usage. The separate paid public execution ASP is `https://mcp.agentpay.site/mcp` and is used only after Review & Sign.
 
+Hosted onboarding is X Layer mainnet only (chain ID `196`). New owners continue at `https://onboard.agentpay.site/setup`, where AgentPay sponsors exactly one smart-account deployment. The setup signature proves ownership and is not payment authorization. A new wallet starts USDT0-only with no route targets. Production payments use **Review & Sign**. Testnet is self-hosted, staging, or development only.
+
 After installation, ask the user to reload or reconnect the agent runtime if needed. Then return to the agent chat and continue with wallet creation or payment using AgentPay MCP tools.
 
 Use this diagnostic command only when checking self-hosted/operator configuration readiness or troubleshooting:
@@ -94,20 +96,18 @@ If a tool name differs in the active MCP server, use the closest AgentPay tool w
 
 ## Network Selection
 
-AgentPay supports X Layer mainnet and testnet.
+Use X Layer mainnet and `network: "mainnet"` for hosted AgentPay. If the user requests testnet, explain that it requires an explicitly configured self-hosted, staging, or development runtime; never send a testnet request to hosted production.
 
-If the user does not clearly name a network, ask whether they want mainnet or testnet before calling wallet, balance, route-target, admin, contract-call, quote, or payment preparation tools. Pass the selected value as `network: "mainnet" | "testnet"` whenever a tool accepts it. Users can switch networks per request; do not assume a wallet, balance, allowlist, or payment intent on one network applies to the other.
-
-Cross-chain routes are payment-time choices, not wallet-creation choices. Create the wallet on X Layer mainnet or X Layer testnet first, then decide during quote or payment preparation whether the payment stays on that network or uses a cross-chain route.
+Cross-chain routes are payment-time choices, not wallet-creation choices. Create the X Layer mainnet wallet first, then decide during quote or payment preparation whether the payment stays on that network or uses a cross-chain route.
 
 ## Wallet Creation Workflow
 
 When the user asks to create an AgentPay wallet:
 
-1. Confirm X Layer mainnet or testnet if the user did not specify it.
-2. Call `prepare_wallet_creation` with the selected network.
-3. Give the user the setup signing link.
-4. Explain that the signing page proves wallet ownership and does not approve any payment.
+1. Use X Layer mainnet (chain ID `196`) for the hosted flow.
+2. Call `prepare_wallet_creation` with `network: "mainnet"`.
+3. Give the user the fixed hosted onboarding link returned by AgentPay; new owners continue at `https://onboard.agentpay.site/setup`.
+4. Explain that the setup signature proves wallet ownership and is not payment authorization.
 5. Wait for the user to sign on the setup page.
 6. Call `check_wallet_creation`.
 7. When complete, show the AgentPay smart account address and network, then tell the user to fund it with supported tokens on that X Layer network.
@@ -124,9 +124,9 @@ Show the action, account address, owner address, chain, transaction target, and 
 
 When the user asks about funds or before preparing payment:
 
-1. Confirm X Layer mainnet or testnet if the request is ambiguous.
-2. Call `get_agent_wallet` with the selected network if the active wallet is unknown.
-3. Call `get_balance` with the selected network.
+1. Use X Layer mainnet for hosted AgentPay; testnet requires a self-hosted, staging, or development runtime.
+2. Call `get_agent_wallet` with `network: "mainnet"` if the active wallet is unknown.
+3. Call `get_balance` with the same network.
 4. Show balances with token symbols, chain names, and wallet address.
 
 Never use raw wallet balances, exchange balances, or generic RPC balance as AgentPay balance. AgentPay balance means the balance returned by `get_balance` for the AgentPay smart account on the selected network.
@@ -176,7 +176,7 @@ Never prepare contract calls from vague prose, never modify calldata after prepa
 
 For every payment:
 
-1. Understand the requested recipient, amount, token, X Layer source network, destination chain, and purpose. Ask for mainnet or testnet if omitted.
+1. Understand the requested recipient, amount, token, X Layer mainnet source, destination chain, and purpose. Testnet is allowed only on a self-hosted, staging, or development runtime.
 2. Call `quote_payment_route` when route preview is useful or the source/destination token or chain may differ.
 3. Call `prepare_payment`.
 4. Show the returned payment summary to the user. When `authorization` is present, show the canonical typed-data details and exact `authorizationHash`.

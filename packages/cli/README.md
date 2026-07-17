@@ -4,6 +4,8 @@ Owner-authorized stablecoin payments for AI agents.
 
 AgentPay installs MCP tools and runtime instructions for owner-authorized X Layer payments. By default it connects users to the hosted AgentPay MCP endpoint, so normal users do not manage Supabase, RPC, executor, deployer, or bytecode config.
 
+Hosted onboarding is X Layer mainnet only (chain ID `196`). New owners continue at `https://onboard.agentpay.site/setup`, where AgentPay sponsors exactly one smart-account deployment. The setup signature proves ownership and is not payment authorization. A new wallet starts USDT0-only with no route targets, and production payments use **Review & Sign**. Testnet is self-hosted, staging, or development only.
+
 ## Quick Start
 
 ```bash
@@ -21,18 +23,18 @@ The installer writes MCP runtime files and `skills/agentpay/SKILL.md`. The gener
 After install, reload or reconnect your agent runtime if needed, then return to your agent chat. From there, ask naturally:
 
 ```txt
-Create an AgentPay wallet for me on X Layer testnet.
+Create an AgentPay wallet for me on X Layer mainnet.
 ```
 
 or:
 
 ```txt
-Pay 5 USDT0 to 0x... on X Layer testnet for invoice INV-001.
+Pay 5 USDT0 to 0x... on X Layer mainnet for invoice INV-001.
 ```
 
-AgentPay supports X Layer mainnet and testnet. If you do not name one, the agent should ask for mainnet or testnet before creating a wallet or payment. Agent tools accept `network: "mainnet" | "testnet"`, so you can switch networks per request from chat.
+The hosted agent uses `network: "mainnet"`. A testnet request requires an explicitly configured self-hosted, staging, or development runtime and is never sent to hosted production.
 
-Cross-chain routes are selected during quote or payment preparation, not during wallet setup. Create an X Layer mainnet or X Layer testnet AgentPay wallet first, then decide whether a specific payment stays on that network or uses a cross-chain route.
+Cross-chain routes are selected during quote or payment preparation, not during wallet setup. Create the X Layer mainnet wallet first, then decide whether a specific payment stays on that network or uses a cross-chain route.
 
 The agent should use AgentPay tools in chat to create the wallet setup link, check wallet creation, prepare payments, show the canonical EIP-712 authorization, send the owner to Review & Sign, execute with the returned signature, and track status. Exact approval phrases are migration-only and are not accepted on the public V2 execution surface.
 

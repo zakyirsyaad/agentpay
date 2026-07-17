@@ -4,6 +4,8 @@ AgentPay runtime instructions for AI coding agents.
 
 This package contains the AgentPay `SKILL.md` and OpenAI metadata used by `npx @agentpay-ai/agentpay install`. Most users should install the CLI instead of installing this package directly:
 
+Hosted onboarding is X Layer mainnet only (chain ID `196`) at `https://onboard.agentpay.site/setup`. AgentPay sponsors exactly one smart-account deployment. The setup signature proves ownership and is not payment authorization. New accounts start USDT0-only with no route targets, and production payments use **Review & Sign**. Testnet is self-hosted, staging, or development only.
+
 ```bash
 npx @agentpay-ai/agentpay install
 ```

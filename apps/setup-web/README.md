@@ -2,6 +2,8 @@
 
 Local setup and signing web server for AgentPay wallets.
 
+The hosted onboarding surface is X Layer mainnet only (chain ID `196`) at `https://onboard.agentpay.site/setup`. AgentPay sponsors exactly one smart-account deployment. The setup signature proves ownership and is not payment authorization. A new account starts USDT0-only with no route targets; production payments continue through **Review & Sign**. Testnet is self-hosted, staging, or development only.
+
 Most users start it through the CLI:
 
 ```bash
@@ -27,7 +29,7 @@ await startSetupWebServer(createSetupWebDependencies(config));
 
 ## Configuration
 
-Required values include `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `XLAYER_RPC_URL`, and `SETUP_DEPLOYER_PRIVATE_KEY`. Setup defaults to X Layer testnet (`1952`) and keeps its USDT0 + USDC faucet allowlist. The setup parser rejects a production environment or explicit mainnet chain; the production deployment surface is the dedicated Foundry V2 command, where mainnet allows only USDT0 and no route targets. Provide `AGENTPAY_ACCOUNT_BYTECODE_PATH` or `AGENTPAY_ACCOUNT_BYTECODE` for the non-upgradeable `AgentPayAccountV2`; `AGENTPAY_ACCOUNT_BYTECODE_HASH` is mandatory before any X Layer mainnet deployment and pins the exact creation artifact. Review & Sign uses `AGENTPAY_REVIEW_TOKEN_SECRET` when set (otherwise the service-role key fallback) and persists the signature handoff in Supabase.
+The legacy self-hosted setup command requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `XLAYER_RPC_URL`, and `SETUP_DEPLOYER_PRIVATE_KEY`; its testnet mode is for self-hosted, staging, or development use. Hosted production instead runs separate onboarding-web and setup-worker processes with scoped JWTs, pinned manifest/runtime artifacts, a dedicated sponsor signer, encrypted persist-before-broadcast outbox, and fail-closed readiness. Provide `AGENTPAY_ACCOUNT_BYTECODE_PATH` or `AGENTPAY_ACCOUNT_BYTECODE` for the non-upgradeable `AgentPayAccountV2`; mainnet requires exact creation/runtime artifact hashes. Review & Sign uses a dedicated `AGENTPAY_REVIEW_TOKEN_SECRET` and persists only the scoped signature handoff.
 
 Use a dedicated random `AGENTPAY_REVIEW_TOKEN_SECRET` in staging and production, and give the consumer MCP plus setup-web the same value. Remote `SETUP_WEB_URL` values must use HTTPS; plain HTTP is accepted only for `localhost`, `127.0.0.1`, or `::1`.
 

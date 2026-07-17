@@ -84,6 +84,15 @@ async function main() {
     if (!/agentpay:[\s\S]*url: "https:\/\/wallet\.agentpay\.site\/mcp"/.test(hermesConfig)) {
       throw new Error("Hermes install did not register the hosted AgentPay MCP URL.");
     }
+    for (const path of [
+      join(installDir, "skills", "agentpay", "SKILL.md"),
+      join(installDir, "runtimes", "codex", "AGENTS.md"),
+      join(claudeInstallDir, "runtimes", "claude", "CLAUDE.md"),
+      join(cursorInstallDir, "runtimes", "cursor", "rules.md"),
+      join(hermesInstallDir, "runtimes", "hermes", "instructions.md"),
+    ]) {
+      assertProductionOnboardingInstructions(await readFile(path, "utf8"), path);
+    }
     const packagedBytecode = await readFile(join(selfHostedInstallDir, "AgentPayAccount.bin"), "utf8");
     for (const selector of ["9cc1e242", "7b3f2401", "83e988c1", "7882731c"]) {
       if (!packagedBytecode.toLowerCase().includes(selector)) {
@@ -169,6 +178,23 @@ function getClaudeDesktopConfigPath(env) {
   }
 
   return join(env.XDG_CONFIG_HOME, "Claude", "claude_desktop_config.json");
+}
+
+function assertProductionOnboardingInstructions(contents, path) {
+  const requirements = [
+    /X Layer mainnet/i,
+    /chain (?:ID )?`?196`?/i,
+    /https:\/\/onboard\.agentpay\.site\/setup/,
+    /sponsors (?:exactly )?one (?:smart-account )?deployment/i,
+    /setup signature[^.\n]*(?:not|does not)[^.\n]*payment|not payment authorization/i,
+    /USDT0-only|USDT0 only/i,
+    /no route targets/i,
+    /Review & Sign/i,
+    /testnet[^.\n]*(?:self-hosted|staging|development)|(?:self-hosted|staging|development)[^.\n]*testnet/i,
+  ];
+  if (requirements.some((requirement) => !requirement.test(contents))) {
+    throw new Error(`Installed AgentPay instructions are missing the production onboarding contract: ${path}`);
+  }
 }
 
 main().catch((error) => {
