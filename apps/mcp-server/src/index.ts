@@ -28,6 +28,8 @@ export * from "./services/paid-execution-lifecycle.ts";
 export * from "./services/paid-execution-outbox.ts";
 export * from "./services/paid-execution-challenge.ts";
 export * from "./services/invoice-execution-reconciler.ts";
+export * from "./services/production-setup.ts";
+export * from "./services/production-setup-supabase.ts";
 export * from "./services/supabase.ts";
 export * from "./services/x402-bazaar.ts";
 export * from "./tools/account-admin.ts";
