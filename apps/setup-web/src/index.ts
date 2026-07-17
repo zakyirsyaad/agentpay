@@ -3,3 +3,8 @@ export * from "./services/complete-wallet-setup.ts";
 export * from "./runtime.ts";
 export * from "./server.ts";
 export * from "./payment-review.ts";
+export * from "./onboarding/authorization.ts";
+export * from "./onboarding/browser-transaction.ts";
+export * from "./onboarding/page.ts";
+export * from "./onboarding/runtime.ts";
+export * from "./onboarding/server.ts";

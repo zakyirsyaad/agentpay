@@ -1089,6 +1089,37 @@ begin
 end;
 $$;
 
+create or replace function public.read_production_setup_runtime_state()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_runtime public.setup_runtime_state%rowtype;
+begin
+  select * into v_runtime from public.setup_runtime_state where id = 1;
+  if not found then
+    raise exception using message = 'SETUP_RUNTIME_UNAVAILABLE: Production setup runtime is not pinned.';
+  end if;
+  return jsonb_build_object(
+    'environment', v_runtime.environment,
+    'chainId', v_runtime.chain_id,
+    'setupMode', v_runtime.setup_mode,
+    'manifestSha256', v_runtime.manifest_sha256,
+    'factoryAddress', v_runtime.factory_address,
+    'factoryRuntimeCodeHash', v_runtime.factory_runtime_code_hash,
+    'executorAddress', v_runtime.executor_address,
+    'sponsorDeployerAddress', v_runtime.sponsor_deployer_address,
+    'maxDeploymentsPerDay', v_runtime.max_deployments_per_day,
+    'maxGasPerDeployment', v_runtime.max_gas_per_deployment::text,
+    'maxNativeCostPerDayWei', v_runtime.max_native_cost_per_day_wei::text,
+    'maxPending', v_runtime.max_pending
+  );
+end;
+$$;
+
 alter table public.setup_runtime_state enable row level security;
 alter table public.setup_canary_owners enable row level security;
 alter table public.setup_deployment_jobs enable row level security;
@@ -1113,6 +1144,7 @@ grant execute on function public.create_production_setup_challenge(
 grant execute on function public.read_production_setup_status(text, timestamptz) to agentpay_setup_web;
 grant execute on function public.consume_production_setup_admission(text, text, timestamptz) to agentpay_setup_web;
 grant execute on function public.prune_expired_production_setups(timestamptz) to agentpay_setup_web;
+grant execute on function public.read_production_setup_runtime_state() to agentpay_setup_web;
 
 grant execute on function public.claim_setup_deployment_job(text, timestamptz, integer) to agentpay_setup_worker;
 grant execute on function public.reserve_setup_sponsor_budget(

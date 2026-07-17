@@ -11,6 +11,7 @@
     "src/runtime.ts",
     "src/server.ts",
     "src/payment-review.ts",
+    "src/onboarding",
     "src/services/account-deployer.ts",
     "src/services/complete-wallet-setup.ts",
     "src/start.ts"
@@ -20,6 +21,7 @@
   },
   "scripts": {
     "start": "tsx src/start.ts",
+    "start:onboarding": "tsx src/onboarding/start.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "test:e2e": "playwright test --config playwright.config.ts",
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
@@ -27,6 +29,7 @@
   "dependencies": {
     "@agentpay-ai/mcp-server": "0.1.11",
     "@agentpay-ai/shared": "0.1.3",
-    "ethers": "^6.17.0"
+    "ethers": "^6.17.0",
+    "zod": "^4.4.3"
   }
 }

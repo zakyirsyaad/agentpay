@@ -418,6 +418,21 @@ describe("mainnet wallet setup HTTP schemas", () => {
     assert.throws(() => mainnetWalletSetupChallengeResponseSchema.parse({ ...response, expiresAt: "not-an-iso-time" }));
   });
 
+  it("accepts every canonical final character for a 32-byte unpadded base64url capability", () => {
+    const response = {
+      capability: `${"a".repeat(42)}A`,
+      csrfToken: `${"b".repeat(42)}A`,
+      typedData: createTypedData(),
+      expiresAt: "2033-05-18T03:33:20.000Z",
+    };
+    for (const finalCharacter of "AEIMQUYcgkosw048") {
+      assert.doesNotThrow(() => mainnetWalletSetupChallengeResponseSchema.parse({
+        ...response,
+        capability: `${"a".repeat(42)}${finalCharacter}`,
+      }));
+    }
+  });
+
   it("accepts only an EVM signature in authorize requests", () => {
     const signature = `0x${"a".repeat(130)}`;
     assert.deepEqual(mainnetWalletSetupAuthorizeRequestSchema.parse({ signature }), { signature });

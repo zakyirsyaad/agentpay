@@ -332,6 +332,34 @@ describe("production setup migration on disposable PostgreSQL", () => {
     );
     assert.notEqual(anonStatus.code, 0, "anon cannot execute web RPCs");
 
+    const webRuntime = JSON.parse(await scalar(
+      "select public.read_production_setup_runtime_state()::text;",
+      { role: "agentpay_setup_web" },
+    ));
+    assert.deepEqual(webRuntime, {
+      environment: "production",
+      chainId: 196,
+      setupMode: "PUBLIC",
+      manifestSha256: hash("1"),
+      factoryAddress: factory,
+      factoryRuntimeCodeHash: hash("2"),
+      executorAddress: executor,
+      sponsorDeployerAddress: deployer,
+      maxDeploymentsPerDay: 10,
+      maxGasPerDeployment: "5000000",
+      maxNativeCostPerDayWei: "1000000000000000000",
+      maxPending: 4,
+    });
+    assert.equal(JSON.stringify(webRuntime).includes("signature"), false);
+
+    for (const role of ["anon", "agentpay_setup_worker"]) {
+      const forbiddenRuntime = await dockerPsql(
+        "select public.read_production_setup_runtime_state();",
+        { role, allowFailure: true },
+      );
+      assert.notEqual(forbiddenRuntime.code, 0, `${role} cannot read the web runtime readiness RPC`);
+    }
+
     const webWorker = await dockerPsql(
       `select public.claim_setup_deployment_job('web', '${now}'::timestamptz, 60);`,
       { role: "agentpay_setup_web", allowFailure: true },

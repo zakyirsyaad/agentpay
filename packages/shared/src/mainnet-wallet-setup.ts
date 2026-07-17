@@ -217,7 +217,7 @@ export type MainnetWalletSetupChallengeRequest = z.infer<typeof mainnetWalletSet
 
 const base64Url32ByteSchema = z
   .string()
-  .regex(/^[A-Za-z0-9_-]{42}[AQgw]$/, "Expected an unpadded 32-byte base64url value");
+  .regex(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, "Expected an unpadded 32-byte base64url value");
 
 export const mainnetWalletSetupChallengeResponseSchema = z
   .object({
