@@ -42,6 +42,7 @@ const FORBIDDEN_ENVIRONMENT_KEYS = [
 const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
 const lowercaseHashSchema = z.string().regex(/^0x[a-f0-9]{64}$/);
 const bareDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const publishableKeySchema = z.string().regex(/^sb_publishable_[A-Za-z0-9_-]{16,}$/);
 const positiveIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const positiveDecimalSchema = z.string().regex(/^[1-9][0-9]*$/).max(78);
 const immutableReferenceSchema = z.object({ start: z.number().int().nonnegative(), length: z.literal(20) }).strict();
@@ -107,6 +108,7 @@ export interface ProductionOnboardingConfig {
   readonly mode: ProductionSetupMode;
   readonly scopedWebToken: string;
   readonly supabaseUrl: string;
+  readonly supabaseApiKey: string;
   readonly mainnetRpcUrl: string;
   readonly manifestPath: string;
   readonly manifestSha256: string;
@@ -153,6 +155,7 @@ export function parseProductionOnboardingConfig(
   }
   const required = [
     "AGENTPAY_ENVIRONMENT", "AGENTPAY_SETUP_MODE", "AGENTPAY_SETUP_WEB_TOKEN", "SUPABASE_URL",
+    "SUPABASE_PUBLISHABLE_KEY",
     "XLAYER_MAINNET_RPC_URL", "AGENTPAY_ONBOARDING_MANIFEST_PATH",
     "AGENTPAY_ONBOARDING_MANIFEST_SHA256", "AGENTPAY_ACCOUNT_RUNTIME_ARTIFACT_PATH",
     "AGENTPAY_FACTORY_ADDRESS", "AGENTPAY_FACTORY_RUNTIME_CODE_HASH", "AGENTPAY_COOKIE_HMAC_SECRET",
@@ -168,6 +171,9 @@ export function parseProductionOnboardingConfig(
   const factoryAddress = getAddress(addressSchema.parse(normalized.AGENTPAY_FACTORY_ADDRESS)).toLowerCase();
   const factoryRuntimeCodeHash = lowercaseHashSchema.parse(normalized.AGENTPAY_FACTORY_RUNTIME_CODE_HASH);
   const supabaseUrl = requireProductionUrl(normalized.SUPABASE_URL!, "supabase");
+  const parsedSupabaseApiKey = publishableKeySchema.safeParse(normalized.SUPABASE_PUBLISHABLE_KEY);
+  if (!parsedSupabaseApiKey.success) throw new Error("SETUP_SUPABASE_API_KEY_INVALID");
+  const supabaseApiKey = parsedSupabaseApiKey.data;
   const mainnetRpcUrl = requireProductionUrl(normalized.XLAYER_MAINNET_RPC_URL!, "rpc");
   if (!new URL(supabaseUrl).hostname.endsWith(".supabase.co")) throw new Error("SETUP_SUPABASE_URL_INVALID");
   if (/test|dev|staging/i.test(new URL(mainnetRpcUrl).hostname)) throw new Error("SETUP_MAINNET_RPC_INVALID");
@@ -208,6 +214,7 @@ export function parseProductionOnboardingConfig(
     mode,
     scopedWebToken: normalized.AGENTPAY_SETUP_WEB_TOKEN!,
     supabaseUrl,
+    supabaseApiKey,
     mainnetRpcUrl,
     manifestPath: normalized.AGENTPAY_ONBOARDING_MANIFEST_PATH!,
     manifestSha256: manifestDigest,
@@ -304,6 +311,7 @@ export async function createProductionOnboardingRuntime(
   await verifyProductionOnboardingRuntime(config, readiness);
   const store = createProductionSetupWebStoreFromConfig({
     supabaseUrl: config.supabaseUrl,
+    supabaseApiKey: config.supabaseApiKey,
     token: config.scopedWebToken,
     rateLimit: { windowSeconds: 60, maxRequests: 10 },
   });
@@ -360,7 +368,7 @@ function createEthersReadiness(
       const response = await fetchImplementation(`${config.supabaseUrl}/rest/v1/rpc/read_production_setup_runtime_state`, {
         method: "POST",
         headers: {
-          apikey: config.scopedWebToken,
+          apikey: config.supabaseApiKey,
           authorization: `Bearer ${config.scopedWebToken}`,
           "content-type": "application/json",
         },

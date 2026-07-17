@@ -20,6 +20,7 @@ export interface ScopedProductionSetupClient {
 
 export interface ScopedProductionSetupClientOptions {
   auth: { autoRefreshToken: false; persistSession: false };
+  accessToken: () => Promise<string>;
 }
 
 export type ScopedProductionSetupClientFactory = (
@@ -30,6 +31,7 @@ export type ScopedProductionSetupClientFactory = (
 
 export interface ScopedProductionSetupConfig {
   supabaseUrl: string;
+  supabaseApiKey: string;
   token: string;
   nowUnix?: number;
   minimumRemainingSeconds?: number;
@@ -301,6 +303,7 @@ function createScopedClient(
   requiredRole: "agentpay_setup_web" | "agentpay_setup_worker",
 ): ScopedProductionSetupClient {
   assertScopedToken(config, requiredRole);
+  assertPublicApiKey(config.supabaseApiKey);
   let url: URL;
   try {
     url = new URL(config.supabaseUrl);
@@ -310,10 +313,17 @@ function createScopedClient(
   if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/") {
     throw invalidTokenConfiguration();
   }
-  const options = { auth: { autoRefreshToken: false as const, persistSession: false as const } };
-  const factory = config.clientFactory ?? ((supabaseUrl, token, clientOptions) =>
-    createClient(supabaseUrl, token, clientOptions) as unknown as ScopedProductionSetupClient);
-  return factory(url.toString().replace(/\/$/, ""), config.token, options);
+  const options = {
+    auth: { autoRefreshToken: false as const, persistSession: false as const },
+    accessToken: async () => config.token,
+  };
+  const factory = config.clientFactory ?? ((supabaseUrl, apiKey, clientOptions) =>
+    createClient(supabaseUrl, apiKey, clientOptions) as unknown as ScopedProductionSetupClient);
+  return factory(url.toString().replace(/\/$/, ""), config.supabaseApiKey, options);
+}
+
+function assertPublicApiKey(value: string): void {
+  if (!/^sb_publishable_[A-Za-z0-9_-]{16,}$/.test(value)) throw invalidTokenConfiguration();
 }
 
 function assertScopedToken(

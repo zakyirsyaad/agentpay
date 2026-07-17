@@ -39,6 +39,7 @@ const FORBIDDEN_ENV_KEYS = [
 const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
 const hashSchema = z.string().regex(/^0x[a-f0-9]{64}$/);
 const bareHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const publishableKeySchema = z.string().regex(/^sb_publishable_[A-Za-z0-9_-]{16,}$/);
 const positiveDecimalSchema = z.string().regex(/^[1-9][0-9]*$/).max(78);
 const positiveIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const referenceSchema = z.object({ start: z.number().int().nonnegative(), length: z.literal(20) }).strict();
@@ -94,6 +95,7 @@ export interface ProductionSetupWorkerConfig {
   readonly mode: "OFF" | "CANARY" | "PUBLIC" | "DRAIN";
   readonly scopedWorkerToken: string;
   readonly supabaseUrl: string;
+  readonly supabaseApiKey: string;
   readonly mainnetRpcUrl: string;
   readonly manifestPath: string;
   readonly manifestSha256: string;
@@ -135,6 +137,7 @@ export function parseProductionSetupWorkerConfig(
   for (const key of FORBIDDEN_ENV_KEYS) if (values[key]) throw new Error(`SETUP_WORKER_FORBIDDEN_ENV:${key}`);
   const required = [
     "AGENTPAY_ENVIRONMENT", "AGENTPAY_SETUP_MODE", "AGENTPAY_SETUP_WORKER_TOKEN", "SUPABASE_URL",
+    "SUPABASE_PUBLISHABLE_KEY",
     "XLAYER_MAINNET_RPC_URL", "AGENTPAY_ONBOARDING_MANIFEST_PATH", "AGENTPAY_ONBOARDING_MANIFEST_SHA256",
     "AGENTPAY_ACCOUNT_RUNTIME_ARTIFACT_PATH", "AGENTPAY_FACTORY_ADDRESS", "AGENTPAY_FACTORY_RUNTIME_CODE_HASH",
     "AGENTPAY_SETUP_DEPLOYER_PRIVATE_KEY", "AGENTPAY_SETUP_RAW_TX_ENCRYPTION_KEY", "AGENTPAY_SETUP_WORKER_ID",
@@ -177,6 +180,9 @@ export function parseProductionSetupWorkerConfig(
   if (encryptionKey.byteLength !== 32) throw new Error("SETUP_WORKER_ENCRYPTION_KEY_INVALID");
   validateScopedWorkerToken(values.AGENTPAY_SETUP_WORKER_TOKEN!, options.nowUnix ?? Math.floor(Date.now() / 1_000));
   const supabaseUrl = requireHttpsUrl(values.SUPABASE_URL!, "SETUP_WORKER_SUPABASE_URL_INVALID");
+  const parsedSupabaseApiKey = publishableKeySchema.safeParse(values.SUPABASE_PUBLISHABLE_KEY);
+  if (!parsedSupabaseApiKey.success) throw new Error("SETUP_WORKER_SUPABASE_API_KEY_INVALID");
+  const supabaseApiKey = parsedSupabaseApiKey.data;
   if (!new URL(supabaseUrl).hostname.endsWith(".supabase.co")) throw new Error("SETUP_WORKER_SUPABASE_URL_INVALID");
   const mainnetRpcUrl = requireHttpsUrl(values.XLAYER_MAINNET_RPC_URL!, "SETUP_WORKER_RPC_URL_INVALID");
   if (/test|dev|staging/i.test(new URL(mainnetRpcUrl).hostname)) throw new Error("SETUP_WORKER_RPC_URL_INVALID");
@@ -207,7 +213,7 @@ export function parseProductionSetupWorkerConfig(
 
   return deepFreeze({
     environment: "production" as const, chainId: 196 as const, mode,
-    scopedWorkerToken: values.AGENTPAY_SETUP_WORKER_TOKEN!, supabaseUrl, mainnetRpcUrl,
+    scopedWorkerToken: values.AGENTPAY_SETUP_WORKER_TOKEN!, supabaseUrl, supabaseApiKey, mainnetRpcUrl,
     manifestPath: values.AGENTPAY_ONBOARDING_MANIFEST_PATH!, manifestSha256,
     runtimeArtifactPath: values.AGENTPAY_ACCOUNT_RUNTIME_ARTIFACT_PATH!, factoryAddress,
     factoryRuntimeCodeHash, factoryDeploymentBlock: manifest.factory.deploymentBlock,
@@ -245,6 +251,7 @@ export async function createProductionSetupWorkerRuntime(
   await verifyWorkerRuntime(config, provider, signer, factory, fetchImplementation);
   const store = createProductionSetupWorkerStoreFromConfig({
     supabaseUrl: config.supabaseUrl,
+    supabaseApiKey: config.supabaseApiKey,
     token: config.scopedWorkerToken,
     sponsorPolicy: {
       maxDeploymentsPerDay: config.manifest.sponsor.maxDeploymentsPerDay,
@@ -359,7 +366,7 @@ async function readWorkerDatabaseRuntime(
 ): Promise<WorkerDatabaseRuntime> {
   const response = await fetchImplementation(`${config.supabaseUrl}/rest/v1/rpc/read_production_setup_worker_runtime_state`, {
     method: "POST",
-    headers: { apikey: config.scopedWorkerToken, authorization: `Bearer ${config.scopedWorkerToken}`, "content-type": "application/json" },
+    headers: { apikey: config.supabaseApiKey, authorization: `Bearer ${config.scopedWorkerToken}`, "content-type": "application/json" },
     body: "{}",
   });
   if (!response.ok) throw new Error("SETUP_WORKER_DATABASE_RUNTIME_UNAVAILABLE");

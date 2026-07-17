@@ -46,6 +46,7 @@ function fixture() {
   const env = {
     AGENTPAY_ENVIRONMENT: "production", AGENTPAY_SETUP_MODE: "PUBLIC",
     AGENTPAY_SETUP_WORKER_TOKEN: token("agentpay_setup_worker"), SUPABASE_URL: "https://prod.supabase.co",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_agentpay_test_key_1234567890",
     XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech", AGENTPAY_ONBOARDING_MANIFEST_PATH: "/private/manifest.json",
     AGENTPAY_ONBOARDING_MANIFEST_SHA256: digest, AGENTPAY_ACCOUNT_RUNTIME_ARTIFACT_PATH: "/private/runtime.json",
     AGENTPAY_FACTORY_ADDRESS: factory, AGENTPAY_FACTORY_RUNTIME_CODE_HASH: hash("3"),
@@ -75,6 +76,7 @@ describe("production setup worker runtime config", () => {
     assert.equal(config.factoryDeploymentBlock, 100);
     assert.equal(config.limits.maxGasLimit, 2_000_000n);
     assert.equal(config.encryptionKey.byteLength, 32);
+    assert.equal(config.supabaseApiKey, "sb_publishable_agentpay_test_key_1234567890");
     assert.ok(!Object.values(config).includes(input.env.AGENTPAY_SETUP_DEPLOYER_PRIVATE_KEY as never));
   });
 
@@ -85,6 +87,7 @@ describe("production setup worker runtime config", () => {
       { AGENTPAY_SETUP_WORKER_TOKEN: token("service_role") },
       { XLAYER_TESTNET_RPC_URL: "https://testrpc.example" },
       { SUPABASE_SERVICE_ROLE_KEY: "secret" },
+      { SUPABASE_PUBLISHABLE_KEY: "sb_secret_forbidden" },
       { AGENTPAY_REVIEW_TOKEN_SECRET: "secret" },
       { AGENTPAY_SETUP_MAX_PENDING: "5" },
       { AGENTPAY_SETUP_MAX_SIGNER_BALANCE_WEI: "1000000000000000001" },

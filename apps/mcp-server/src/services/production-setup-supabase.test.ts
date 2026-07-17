@@ -7,6 +7,7 @@ import {
   createProductionSetupWebStoreFromConfig,
   createProductionSetupWorkerStoreFromConfig,
   type ScopedProductionSetupClient,
+  type ScopedProductionSetupClientOptions,
 } from "./production-setup-supabase.ts";
 
 function token(role: string, expiresAt: number): string {
@@ -27,7 +28,13 @@ function clientReturning(dataByRpc: Record<string, unknown>) {
 
 const nowUnix = 1_800_000_000;
 const future = nowUnix + 3_600;
-const baseConfig = { supabaseUrl: "https://production.supabase.co", nowUnix, minimumRemainingSeconds: 900 };
+const publishableKey = "sb_publishable_agentpay_test_key_1234567890";
+const baseConfig = {
+  supabaseUrl: "https://production.supabase.co",
+  supabaseApiKey: publishableKey,
+  nowUnix,
+  minimumRemainingSeconds: 900,
+};
 const rateLimit = { windowSeconds: 60, maxRequests: 20 };
 const sponsorPolicy = {
   maxDeploymentsPerDay: 10,
@@ -37,25 +44,27 @@ const sponsorPolicy = {
 };
 
 describe("scoped production setup Supabase adapters", () => {
-  it("constructs exact RPC-only web and worker surfaces with non-persistent auth", () => {
+  it("constructs exact RPC-only web and worker surfaces with a public API key and scoped bearer auth", async () => {
     const webMock = clientReturning({});
     const workerMock = clientReturning({});
-    const options: unknown[] = [];
+    const clients: Array<{ apiKey: string; token: string; options: ScopedProductionSetupClientOptions }> = [];
+    const webToken = token("agentpay_setup_web", future);
+    const workerToken = token("agentpay_setup_worker", future);
     const web = createProductionSetupWebStoreFromConfig({
       ...baseConfig,
-      token: token("agentpay_setup_web", future),
+      token: webToken,
       rateLimit,
-      clientFactory: (_url, _token, config) => {
-        options.push(config);
+      clientFactory: (_url, apiKey, config) => {
+        clients.push({ apiKey, token: webToken, options: config });
         return webMock.client;
       },
     });
     const worker = createProductionSetupWorkerStoreFromConfig({
       ...baseConfig,
-      token: token("agentpay_setup_worker", future),
+      token: workerToken,
       sponsorPolicy,
-      clientFactory: (_url, _token, config) => {
-        options.push(config);
+      clientFactory: (_url, apiKey, config) => {
+        clients.push({ apiKey, token: workerToken, options: config });
         return workerMock.client;
       },
     });
@@ -71,8 +80,26 @@ describe("scoped production setup Supabase adapters", () => {
       "recordReceipt",
       "reserve",
     ]);
-    for (const config of options) {
-      assert.deepEqual(config, { auth: { autoRefreshToken: false, persistSession: false } });
+    for (const client of clients) {
+      assert.equal(client.apiKey, publishableKey);
+      assert.deepEqual(client.options.auth, { autoRefreshToken: false, persistSession: false });
+      assert.equal(await client.options.accessToken(), client.token);
+    }
+  });
+
+  it("rejects secret, service-role, and missing project API keys", () => {
+    const clientFactory = () => clientReturning({}).client;
+    for (const supabaseApiKey of [undefined, "sb_secret_forbidden", token("service_role", future)]) {
+      assert.throws(
+        () => createProductionSetupWebStoreFromConfig({
+          ...baseConfig,
+          supabaseApiKey: supabaseApiKey as string,
+          token: token("agentpay_setup_web", future),
+          rateLimit,
+          clientFactory,
+        }),
+        (error: unknown) => error instanceof ProductionSetupStoreError && error.code === "SETUP_SCOPED_TOKEN_INVALID",
+      );
     }
   });
 

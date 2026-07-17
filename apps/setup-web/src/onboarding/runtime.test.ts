@@ -65,6 +65,7 @@ function validEnv(overrides: Record<string, string | undefined> = {}) {
     AGENTPAY_SETUP_MODE: "PUBLIC",
     AGENTPAY_SETUP_WEB_TOKEN: jwt(),
     SUPABASE_URL: "https://zcwsmivbgcrfyrvfptxk.supabase.co",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_agentpay_test_key_1234567890",
     XLAYER_MAINNET_RPC_URL: "https://rpc.xlayer.tech",
     AGENTPAY_ONBOARDING_MANIFEST_PATH: "/run/agentpay/onboarding.json",
     AGENTPAY_ONBOARDING_MANIFEST_SHA256: canonicalManifestSha256(manifest),
@@ -96,6 +97,7 @@ describe("production onboarding runtime config", () => {
     assert.equal(config.manifestSha256, canonicalManifestSha256(manifest));
     assert.equal(config.factoryAddress, manifest.factory.address);
     assert.equal(config.factoryRuntimeCodeHash, manifest.factory.runtimeCodeHash);
+    assert.equal(config.supabaseApiKey, "sb_publishable_agentpay_test_key_1234567890");
     assert.equal(config.runtimeArtifact.runtimeTemplateHash, runtimeArtifact.runtimeTemplateHash);
     assert.equal("serviceRoleKey" in config, false);
     assert.equal("privateKey" in config, false);
@@ -104,6 +106,8 @@ describe("production onboarding runtime config", () => {
   it("rejects service roles, signing keys, testnet inputs, routes, USDC, weak secrets, and artifact drift", () => {
     const invalidEnvironments: Array<[string, Record<string, string | undefined>]> = [
       ["service role", { AGENTPAY_SETUP_WEB_TOKEN: jwt("service_role") }],
+      ["missing publishable key", { SUPABASE_PUBLISHABLE_KEY: undefined }],
+      ["secret API key", { SUPABASE_PUBLISHABLE_KEY: "sb_secret_forbidden" }],
       ["deployer key", { SETUP_DEPLOYER_PRIVATE_KEY: `0x${"1".repeat(64)}` }],
       ["executor key", { AGENTPAY_EXECUTOR_PRIVATE_KEY: `0x${"1".repeat(64)}` }],
       ["testnet RPC", { XLAYER_TESTNET_RPC_URL: "https://testrpc.xlayer.tech" }],
