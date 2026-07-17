@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-
 import type { MainnetWalletSetupPublicStatus } from "@agentpay-ai/shared";
-
 export type ProductionSetupStatus =
   | "PENDING"
   | "ADMITTED"
@@ -14,7 +12,6 @@ export type ProductionSetupStatus =
   | "EXPIRED"
   | "FAILED"
   | "MANUAL_REVIEW";
-
 export type SetupDeploymentJobStatus =
   | "QUEUED"
   | "SIGNING"
@@ -25,7 +22,6 @@ export type SetupDeploymentJobStatus =
   | "COMPLETED"
   | "FAILED"
   | "MANUAL_REVIEW";
-
 export interface ProductionSetupIntent {
   readonly id: string;
   readonly capabilityDigest: string;
@@ -51,14 +47,12 @@ export interface ProductionSetupIntent {
   readonly completedAt?: string;
   readonly publicCode?: string;
 }
-
 export interface EncryptedSetupTransaction {
   readonly ciphertext: string;
   readonly iv: string;
   readonly tag: string;
   readonly hash: string;
 }
-
 export interface SetupDeploymentJob {
   readonly id: string;
   readonly setupIntentId: string;
@@ -75,6 +69,7 @@ export interface SetupDeploymentJob {
   readonly attemptCount: number;
   readonly receiptStatus?: 0 | 1;
   readonly receiptBlockNumber?: string;
+  readonly existingAccountVerified?: boolean;
   readonly broadcastAt?: string;
   readonly confirmedAt?: string;
   readonly completedAt?: string;
@@ -82,7 +77,6 @@ export interface SetupDeploymentJob {
   readonly createdAt: string;
   readonly updatedAt: string;
 }
-
 export interface SetupDeploymentEvent {
   readonly id: string;
   readonly setupIntentId: string;
@@ -93,7 +87,6 @@ export interface SetupDeploymentEvent {
   readonly metadata: Readonly<Record<string, string | number | boolean>>;
   readonly createdAt: string;
 }
-
 export interface SetupSponsorReservation {
   readonly id: string;
   readonly jobId: string;
@@ -105,7 +98,6 @@ export interface SetupSponsorReservation {
   readonly status: "CHARGED";
   readonly reservedAt: string;
 }
-
 export interface ProductionSetupChallengeInput {
   setupIntentId: string;
   capabilityDigest: string;
@@ -126,15 +118,15 @@ export interface ProductionSetupChallengeInput {
   at: string;
   rateLimitKeyDigest: string;
 }
-
 export interface SetupAdmissionInput {
   capabilityDigest: string;
   ownerSetupSignature: string;
   at: string;
 }
-
 export interface SetupWorkerClaim {
   readonly disposition: "CLAIMED";
+  readonly jobStatus: Extract<SetupDeploymentJobStatus,
+    "SIGNING" | "SIGNED" | "BROADCAST" | "BROADCAST_UNKNOWN" | "CONFIRMING">;
   readonly jobId: string;
   readonly setupIntentId: string;
   readonly tenantId: string;
@@ -154,8 +146,15 @@ export interface SetupWorkerClaim {
   readonly accountRuntimeCodeHash: string;
   readonly authorizationHash: string;
   readonly expiresAt: string;
+  readonly deployerAddress?: string;
+  readonly deployerNonce?: string;
+  readonly transactionHash?: string;
+  readonly rawTransaction?: EncryptedSetupTransaction;
+  readonly receiptStatus?: 0 | 1;
+  readonly receiptBlockNumber?: string;
+  readonly existingAccountVerified?: boolean;
+  readonly broadcastAt?: string;
 }
-
 export interface SponsorPolicy {
   readonly deployerAddress: string;
   readonly maxDeploymentsPerDay: number;
@@ -163,7 +162,6 @@ export interface SponsorPolicy {
   readonly maxNativeCostPerDayWei: bigint;
   readonly maxPending: number;
 }
-
 export interface ProductionSetupWebStore {
   challenge(input: ProductionSetupChallengeInput): Promise<{
     disposition: "CREATED" | "REPLAY";
@@ -178,7 +176,6 @@ export interface ProductionSetupWebStore {
   status(input: { capabilityDigest: string; at: string }): Promise<MainnetWalletSetupPublicStatus>;
   prune(input: { at: string }): Promise<{ expiredSetups: number; deletedRateBuckets: number }>;
 }
-
 export interface ProductionSetupWorkerStore {
   claim(input: { workerId: string; at: string; leaseSeconds: number }): Promise<SetupWorkerClaim | null>;
   reserve(input: {
@@ -216,6 +213,12 @@ export interface ProductionSetupWorkerStore {
     receiptBlockNumber: string;
     at: string;
   }): Promise<{ disposition: "RECORDED" | "REPLAY"; jobId: string; status: "CONFIRMING" | "FAILED" }>;
+  recordExistingAccount(input: {
+    jobId: string;
+    fencingToken: string;
+    verificationBlockNumber: string;
+    at: string;
+  }): Promise<{ disposition: "RECORDED" | "REPLAY"; jobId: string; status: "CONFIRMING" }>;
   finalize(input: { jobId: string; fencingToken: string; at: string }): Promise<{
     disposition: "COMPLETED" | "REPLAY";
     jobId: string;
@@ -229,14 +232,12 @@ export interface ProductionSetupWorkerStore {
     at: string;
   }): Promise<{ disposition: "MANUAL_REVIEW" | "REPLAY"; jobId: string; status: "MANUAL_REVIEW" }>;
 }
-
 export class ProductionSetupStoreError extends Error {
   constructor(readonly code: string, message = "Production setup operation failed.") {
     super(message);
     this.name = "ProductionSetupStoreError";
   }
 }
-
 interface InternalIntent extends ProductionSetupIntent {
   readonly ownerSetupSignature?: string;
   readonly tenantId?: string;
@@ -399,27 +400,34 @@ export function createInMemoryProductionSetupStores(options: {
       if (!/^[A-Za-z0-9:_-]{1,128}$/.test(input.workerId) || input.leaseSeconds < 15 || input.leaseSeconds > 900) {
         throw setupError("SETUP_INPUT_INVALID");
       }
+      const recoverableStatuses: readonly SetupDeploymentJobStatus[] = [
+        "SIGNING", "SIGNED", "BROADCAST", "BROADCAST_UNKNOWN", "CONFIRMING",
+      ];
       const candidate = [...jobs.values()]
-        .filter((job) => job.status === "QUEUED" || (job.status === "SIGNING" && Date.parse(job.leaseUntil ?? "") <= Date.parse(input.at)))
+        .filter((job) => job.status === "QUEUED" || (recoverableStatuses.includes(job.status)
+          && Date.parse(job.leaseUntil ?? "") <= Date.parse(input.at)))
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
       if (!candidate) return null;
       const intent = requireIntent(intents, candidate.setupIntentId);
       if (!intent.ownerSetupSignature) throw setupError("SETUP_SIGNATURE_MISSING");
+      const jobStatus = candidate.status === "QUEUED" ? "SIGNING" as const : candidate.status as SetupWorkerClaim["jobStatus"];
       const updatedJob: SetupDeploymentJob = freeze({
         ...candidate,
-        status: "SIGNING" as const,
+        status: jobStatus,
         workerId: input.workerId,
         fencingToken: createFencingToken(),
         leaseUntil: new Date(Date.parse(input.at) + input.leaseSeconds * 1_000).toISOString(),
         attemptCount: candidate.attemptCount + 1,
         updatedAt: input.at,
       });
-      const updatedIntent: InternalIntent = freeze({ ...intent, status: "SIGNING" as const, updatedAt: input.at });
+      const intentStatus: ProductionSetupStatus = candidate.status === "QUEUED" ? "SIGNING" : intent.status;
+      const updatedIntent: InternalIntent = freeze({ ...intent, status: intentStatus, updatedAt: input.at });
       jobs.set(candidate.id, updatedJob);
       intents.set(intent.id, updatedIntent);
       appendEvent(intent.id, "SETUP_JOB_CLAIMED", input.at, updatedJob);
       return freeze({
         disposition: "CLAIMED" as const,
+        jobStatus,
         jobId: updatedJob.id,
         setupIntentId: updatedIntent.id,
         tenantId: updatedJob.tenantId,
@@ -439,6 +447,14 @@ export function createInMemoryProductionSetupStores(options: {
         accountRuntimeCodeHash: updatedIntent.accountRuntimeCodeHash,
         authorizationHash: updatedIntent.authorizationHash,
         expiresAt: updatedIntent.expiresAt,
+        ...(updatedJob.deployerAddress ? { deployerAddress: updatedJob.deployerAddress } : {}),
+        ...(updatedJob.deployerNonce ? { deployerNonce: updatedJob.deployerNonce } : {}),
+        ...(updatedJob.transactionHash ? { transactionHash: updatedJob.transactionHash } : {}),
+        ...(updatedJob.rawTransaction ? { rawTransaction: updatedJob.rawTransaction } : {}),
+        ...(updatedJob.receiptStatus !== undefined ? { receiptStatus: updatedJob.receiptStatus } : {}),
+        ...(updatedJob.receiptBlockNumber ? { receiptBlockNumber: updatedJob.receiptBlockNumber } : {}),
+        ...(updatedJob.existingAccountVerified ? { existingAccountVerified: true } : {}),
+        ...(updatedJob.broadcastAt ? { broadcastAt: updatedJob.broadcastAt } : {}),
       });
     },
 
@@ -527,7 +543,7 @@ export function createInMemoryProductionSetupStores(options: {
       }
       if (job.status !== "SIGNED") throw setupError("SETUP_STATE_CONFLICT");
       const updatedJob: SetupDeploymentJob = freeze({
-        ...job, status: input.result, ...(input.result === "BROADCAST" ? { broadcastAt: input.at } : {}),
+        ...job, status: input.result, broadcastAt: job.broadcastAt ?? input.at,
         ...(input.publicCode ? { publicCode: input.publicCode } : {}), updatedAt: input.at,
       });
       updateIntentStatus(job.setupIntentId, input.result, input.at, input.publicCode ? { publicCode: input.publicCode } : {});
@@ -561,6 +577,35 @@ export function createInMemoryProductionSetupStores(options: {
         receiptStatus: input.receiptStatus, blockNumber: input.receiptBlockNumber,
       });
       return freeze({ disposition: "RECORDED" as const, jobId: job.id, status: nextStatus });
+    },
+
+    async recordExistingAccount(input) {
+      const job = requireJob(jobs, input.jobId);
+      requireFence(job, input.fencingToken);
+      assertTimestamp(input.at);
+      parseAtomic(input.verificationBlockNumber, true);
+      if (job.status === "CONFIRMING" && job.existingAccountVerified
+        && job.receiptBlockNumber === input.verificationBlockNumber) {
+        return freeze({ disposition: "REPLAY" as const, jobId: job.id, status: "CONFIRMING" as const });
+      }
+      if (job.status !== "SIGNING" || reservations.has(job.id) || job.transactionHash || job.rawTransaction) {
+        throw setupError("SETUP_STATE_CONFLICT");
+      }
+      const updatedJob: SetupDeploymentJob = freeze({
+        ...job,
+        status: "CONFIRMING" as const,
+        receiptStatus: 1 as const,
+        receiptBlockNumber: input.verificationBlockNumber,
+        existingAccountVerified: true,
+        confirmedAt: input.at,
+        updatedAt: input.at,
+      });
+      updateIntentStatus(job.setupIntentId, "CONFIRMING", input.at);
+      jobs.set(job.id, updatedJob);
+      appendEvent(job.setupIntentId, "SETUP_EXISTING_ACCOUNT_VERIFIED", input.at, updatedJob, undefined, {
+        blockNumber: input.verificationBlockNumber,
+      });
+      return freeze({ disposition: "RECORDED" as const, jobId: job.id, status: "CONFIRMING" as const });
     },
 
     async finalize(input) {
@@ -603,7 +648,6 @@ export function createInMemoryProductionSetupStores(options: {
       return freeze({ disposition: "MANUAL_REVIEW" as const, jobId: job.id, status: "MANUAL_REVIEW" as const });
     },
   };
-
   function appendEvent(
     setupIntentId: string,
     eventType: string,
@@ -618,7 +662,6 @@ export function createInMemoryProductionSetupStores(options: {
       eventType, ...(publicCode ? { publicCode } : {}), metadata: freeze({ ...metadata }), createdAt,
     }));
   }
-
   function updateIntentStatus(
     id: string,
     status: ProductionSetupStatus,
@@ -628,7 +671,6 @@ export function createInMemoryProductionSetupStores(options: {
     const intent = requireIntent(intents, id);
     intents.set(id, freeze({ ...intent, status, updatedAt, ...extra }));
   }
-
   return freeze({
     web: freeze(web),
     worker: freeze(worker),
@@ -640,7 +682,6 @@ export function createInMemoryProductionSetupStores(options: {
     }),
   });
 }
-
 function normalizeChallenge(input: ProductionSetupChallengeInput): ProductionSetupChallengeInput {
   if (input.homeChainId !== 196 || input.setupIntentId.length < 16 || input.messageToSign.length === 0) throw setupError("SETUP_INPUT_INVALID");
   assertDigest(input.capabilityDigest);
@@ -661,7 +702,6 @@ function normalizeChallenge(input: ProductionSetupChallengeInput): ProductionSet
     accountRuntimeCodeHash: input.accountRuntimeCodeHash.toLowerCase(), authorizationHash: input.authorizationHash.toLowerCase(),
   });
 }
-
 function sameChallenge(existing: ProductionSetupIntent, input: ProductionSetupChallengeInput): boolean {
   return existing.id === input.setupIntentId && existing.ownerAddress === input.ownerAddress
     && existing.executorAddress === input.executorAddress && existing.messageToSign === input.messageToSign
@@ -672,7 +712,6 @@ function sameChallenge(existing: ProductionSetupIntent, input: ProductionSetupCh
     && existing.accountRuntimeCodeHash === input.accountRuntimeCodeHash
     && existing.authorizationHash === input.authorizationHash && existing.expiresAt === input.expiresAt;
 }
-
 function mapPublicStatus(intent: ProductionSetupIntent, at: string): MainnetWalletSetupPublicStatus["status"] {
   if (intent.status === "PENDING" && Date.parse(intent.expiresAt) <= Date.parse(at)) return "SETUP_EXPIRED";
   if (["PENDING", "ADMITTED"].includes(intent.status)) return "SETUP_PENDING";
@@ -682,30 +721,24 @@ function mapPublicStatus(intent: ProductionSetupIntent, at: string): MainnetWall
   if (intent.status === "MANUAL_REVIEW") return "SETUP_MANUAL_REVIEW";
   return "SETUP_FAILED";
 }
-
 function publicIntent(intent: InternalIntent): ProductionSetupIntent {
   const { ownerSetupSignature: _signature, tenantId: _tenant, jobId: _job, ...record } = intent;
   return freeze({ ...record });
 }
-
 function cloneJob(job: SetupDeploymentJob): SetupDeploymentJob {
   return freeze({ ...job, ...(job.rawTransaction ? { rawTransaction: freeze({ ...job.rawTransaction }) } : {}) });
 }
-
 function cloneEvent(event: SetupDeploymentEvent): SetupDeploymentEvent {
   return freeze({ ...event, metadata: freeze({ ...event.metadata }) });
 }
-
 function cloneReservation(reservation: SetupSponsorReservation): SetupSponsorReservation {
   return freeze({ ...reservation });
 }
-
 function requireIntent(records: Map<string, InternalIntent>, id: string): InternalIntent {
   const record = records.get(id);
   if (!record) throw setupError("SETUP_NOT_FOUND");
   return record;
 }
-
 function requireIntentByCapability(
   byCapability: Map<string, string>, records: Map<string, InternalIntent>, digest: string,
 ): InternalIntent {
@@ -713,67 +746,53 @@ function requireIntentByCapability(
   if (!id) throw setupError("SETUP_NOT_FOUND");
   return requireIntent(records, id);
 }
-
 function requireJob(records: Map<string, SetupDeploymentJob>, id: string): SetupDeploymentJob {
   const job = records.get(id);
   if (!job) throw setupError("SETUP_JOB_NOT_FOUND");
   return job;
 }
-
 function requireFence(job: SetupDeploymentJob, fencingToken: string): void {
   if (!job.fencingToken || job.fencingToken !== fencingToken) throw setupError("SETUP_FENCE_STALE");
 }
-
 function assertDigest(value: string): void {
   if (!/^[0-9a-fA-F]{64}$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
 }
-
 function assertHash(value: string): void {
   if (!/^0x[0-9a-fA-F]{64}$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
 }
-
 function assertSignature(value: string): void {
   if (!/^0x[0-9a-fA-F]{130}$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
 }
-
 function assertTimestamp(value: string): void {
   if (!Number.isFinite(Date.parse(value))) throw setupError("SETUP_INPUT_INVALID");
 }
-
 function assertPublicCode(value: string): void {
   if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
 }
-
 function normalizeAddress(value: string): string {
   if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
   return value.toLowerCase();
 }
-
 function parseAtomic(value: string, allowZero = false): bigint {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) throw setupError("SETUP_INPUT_INVALID");
   const parsed = BigInt(value);
   if ((!allowZero && parsed <= 0n) || parsed >= 2n ** 256n) throw setupError("SETUP_INPUT_INVALID");
   return parsed;
 }
-
 function assertEncryptedTransaction(value: EncryptedSetupTransaction): void {
   if (!value.ciphertext || !value.iv || !value.tag) throw setupError("SETUP_INPUT_INVALID");
   assertDigest(value.hash);
 }
-
 function sameEncrypted(left: EncryptedSetupTransaction | undefined, right: EncryptedSetupTransaction): boolean {
   return left?.ciphertext === right.ciphertext && left.iv === right.iv && left.tag === right.tag
     && left.hash === right.hash.toLowerCase();
 }
-
 function isTerminalIntent(status: ProductionSetupStatus): boolean {
   return ["COMPLETED", "EXPIRED", "FAILED", "MANUAL_REVIEW"].includes(status);
 }
-
 function setupError(code: string): ProductionSetupStoreError {
   return new ProductionSetupStoreError(code);
 }
-
 function freeze<T>(value: T): Readonly<T> & T {
   return Object.freeze(value);
 }

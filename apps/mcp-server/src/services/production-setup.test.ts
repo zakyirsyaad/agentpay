@@ -208,6 +208,77 @@ describe("production setup in-memory stores", () => {
     );
   });
 
+  it("reclaims a persisted signed outbox with identical encrypted bytes after lease expiry", async () => {
+    const stores = await admittedStores();
+    const claimed = await stores.worker.claim({ workerId: "worker-1", at, leaseSeconds: 120 });
+    assert.ok(claimed);
+    assert.equal(claimed.jobStatus, "SIGNING");
+    await stores.worker.reserve({
+      jobId: claimed.jobId,
+      fencingToken: claimed.fencingToken,
+      deployerAddress: deployer,
+      deployerNonce: "7",
+      gasLimit: "1000000",
+      nativeCostWei: "1000",
+      at,
+    });
+    const encrypted = Object.freeze({ ciphertext: "ciphertext", iv: "iv", tag: "tag", hash: bareHash("b") });
+    await stores.worker.persistSignedTransaction({
+      jobId: claimed.jobId,
+      fencingToken: claimed.fencingToken,
+      rawTransaction: encrypted,
+      transactionHash: hash("8"),
+      at,
+    });
+
+    const recovered = await stores.worker.claim({
+      workerId: "worker-2",
+      at: "2026-07-17T05:02:01.000Z",
+      leaseSeconds: 120,
+    });
+    assert.ok(recovered);
+    assert.equal(recovered.jobStatus, "SIGNED");
+    assert.equal(recovered.deployerAddress, deployer);
+    assert.equal(recovered.deployerNonce, "7");
+    assert.equal(recovered.transactionHash, hash("8"));
+    assert.deepEqual(recovered.rawTransaction, encrypted);
+    assert.notEqual(recovered.fencingToken, claimed.fencingToken);
+    await stores.worker.markBroadcastResult({
+      jobId: recovered.jobId,
+      fencingToken: recovered.fencingToken,
+      result: "BROADCAST_UNKNOWN",
+      publicCode: "SETUP_RPC_AMBIGUOUS",
+      at: "2026-07-17T05:02:01.000Z",
+    });
+    const unknown = await stores.worker.claim({
+      workerId: "worker-3",
+      at: "2026-07-17T05:04:02.000Z",
+      leaseSeconds: 120,
+    });
+    assert.equal(unknown?.jobStatus, "BROADCAST_UNKNOWN");
+    assert.equal(unknown?.broadcastAt, "2026-07-17T05:02:01.000Z");
+  });
+
+  it("records an already-existing exact account without charging sponsor budget", async () => {
+    const stores = await admittedStores();
+    const claimed = await stores.worker.claim({ workerId: "worker-1", at, leaseSeconds: 120 });
+    assert.ok(claimed);
+    const recorded = await stores.worker.recordExistingAccount({
+      jobId: claimed.jobId,
+      fencingToken: claimed.fencingToken,
+      verificationBlockNumber: "12345",
+      at,
+    });
+    assert.equal(recorded.status, "CONFIRMING");
+    const completed = await stores.worker.finalize({
+      jobId: claimed.jobId,
+      fencingToken: claimed.fencingToken,
+      at,
+    });
+    assert.equal(completed.accountAddress, predicted);
+    assert.equal(stores.inspect.reservations().length, 0);
+  });
+
   it("enforces daily sponsor caps and resets the counter at UTC rollover", async () => {
     const stores = createStores(1);
     const first = challenge();

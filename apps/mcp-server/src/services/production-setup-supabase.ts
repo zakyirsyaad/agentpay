@@ -60,6 +60,13 @@ const timestampSchema = z.string().datetime({ offset: true });
 const addressSchema = z.string().regex(/^0x[0-9a-f]{40}$/);
 const hashSchema = z.string().regex(/^0x[0-9a-f]{64}$/);
 const signatureSchema = z.string().regex(/^0x[0-9a-f]{130}$/);
+const atomicSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
+const encryptedTransactionSchema = z.object({
+  ciphertext: z.string().min(1),
+  iv: z.string().min(1),
+  tag: z.string().min(1),
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
 
 const challengeResultSchema = z.object({
   disposition: z.enum(["CREATED", "REPLAY"]),
@@ -80,6 +87,7 @@ const pruneResultSchema = z.object({
 
 const workerClaimSchema = z.object({
   disposition: z.literal("CLAIMED"),
+  jobStatus: z.enum(["SIGNING", "SIGNED", "BROADCAST", "BROADCAST_UNKNOWN", "CONFIRMING"]),
   jobId: uuidSchema,
   setupIntentId: z.string().min(16).max(128),
   tenantId: uuidSchema,
@@ -99,6 +107,14 @@ const workerClaimSchema = z.object({
   accountRuntimeCodeHash: hashSchema,
   authorizationHash: hashSchema,
   expiresAt: timestampSchema,
+  deployerAddress: addressSchema.optional(),
+  deployerNonce: atomicSchema.optional(),
+  transactionHash: hashSchema.optional(),
+  rawTransaction: encryptedTransactionSchema.optional(),
+  receiptStatus: z.union([z.literal(0), z.literal(1)]).optional(),
+  receiptBlockNumber: atomicSchema.optional(),
+  existingAccountVerified: z.boolean().optional(),
+  broadcastAt: timestampSchema.optional(),
 }).strict();
 
 const reservationResultSchema = z.object({
@@ -123,6 +139,12 @@ const receiptResultSchema = z.object({
   disposition: z.enum(["RECORDED", "REPLAY"]),
   jobId: uuidSchema,
   status: z.enum(["CONFIRMING", "FAILED"]),
+}).strict();
+
+const existingAccountResultSchema = z.object({
+  disposition: z.enum(["RECORDED", "REPLAY"]),
+  jobId: uuidSchema,
+  status: z.literal("CONFIRMING"),
 }).strict();
 
 const finalizeResultSchema = z.object({
@@ -245,6 +267,14 @@ export function createProductionSetupWorkerStoreFromConfig(
         p_receipt_block_number: input.receiptBlockNumber,
         p_at: input.at,
       }, receiptResultSchema);
+    },
+    async recordExistingAccount(input) {
+      return callRpc(client, "record_existing_setup_account", {
+        p_job_id: input.jobId,
+        p_fencing_token: input.fencingToken,
+        p_verification_block_number: input.verificationBlockNumber,
+        p_at: input.at,
+      }, existingAccountResultSchema);
     },
     async finalize(input) {
       return callRpc(client, "finalize_verified_setup_wallet", {

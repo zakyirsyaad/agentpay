@@ -8,3 +8,8 @@ export * from "./onboarding/browser-transaction.ts";
 export * from "./onboarding/page.ts";
 export * from "./onboarding/runtime.ts";
 export * from "./onboarding/server.ts";
+export * from "./worker/setup-transaction.ts";
+export * from "./worker/setup-account-verifier.ts";
+export * from "./worker/setup-deployment-worker.ts";
+export * from "./worker/runtime.ts";
+export * from "./worker/start.ts";

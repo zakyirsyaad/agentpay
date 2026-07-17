@@ -845,7 +845,7 @@ begin
   end if;
 
   update public.setup_deployment_jobs
-  set status = p_result, broadcast_at = case when p_result = 'BROADCAST' then p_at else broadcast_at end,
+  set status = p_result, broadcast_at = coalesce(broadcast_at, p_at),
       public_error_code = p_public_error_code, updated_at = p_at
   where id = p_job_id and status = 'SIGNED' and fencing_token = p_fencing_token;
   if not found then

@@ -12,6 +12,7 @@
     "src/server.ts",
     "src/payment-review.ts",
     "src/onboarding",
+    "src/worker",
     "src/services/account-deployer.ts",
     "src/services/complete-wallet-setup.ts",
     "src/start.ts"
@@ -22,6 +23,7 @@
   "scripts": {
     "start": "tsx src/start.ts",
     "start:onboarding": "tsx src/onboarding/start.ts",
+    "start:setup-worker": "tsx src/worker/start.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "test:e2e": "playwright test --config playwright.config.ts",
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"

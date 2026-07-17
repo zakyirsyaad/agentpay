@@ -160,8 +160,9 @@ describe("production setup migration on disposable PostgreSQL", () => {
     assert.ok(claimed, "one worker must claim the job");
     assert.equal(claims.filter((result) => result.includes('"disposition": "CLAIMED"')).length, 1);
     assert.equal(claims.filter((result) => result === "").length, 3);
-    const claim = JSON.parse(claimed);
+    let claim = JSON.parse(claimed);
     assert.equal(claim.ownerSetupSignature, signature);
+    assert.equal(claim.jobStatus, "SIGNING");
 
     const reserveSql = `select public.reserve_setup_sponsor_budget(
       '${claim.jobId}'::uuid, '${claim.fencingToken}'::uuid, '${deployer}', 7, 1000000, 1000000000000000,
@@ -183,9 +184,31 @@ describe("production setup migration on disposable PostgreSQL", () => {
     assert.equal(persisted.filter((result) => result.includes('"disposition": "SIGNED"')).length, 1);
     assert.equal(persisted.filter((result) => result.includes('"disposition": "REPLAY"')).length, 7);
 
+    const originalFence = claim.fencingToken;
+    claim = JSON.parse(await scalar(
+      `select public.claim_setup_deployment_job(
+        'worker-recovery', '2026-07-17T05:02:01.000Z'::timestamptz, 120
+      )::text;`,
+      { role: "agentpay_setup_worker" },
+    ));
+    assert.equal(claim.jobStatus, "SIGNED");
+    assert.equal(claim.deployerAddress, deployer);
+    assert.equal(claim.deployerNonce, "7");
+    assert.equal(claim.transactionHash, hash("8"));
+    assert.deepEqual(claim.rawTransaction, {
+      ciphertext: "ciphertext",
+      iv: "iv",
+      tag: "tag",
+      hash: bareHash("c"),
+    });
+    assert.notEqual(claim.fencingToken, originalFence);
+
     await scalar(`select public.mark_setup_broadcast_result(
       '${claim.jobId}'::uuid, '${claim.fencingToken}'::uuid, 'BROADCAST', '${now}'::timestamptz, null
     )::text;`, { role: "agentpay_setup_worker" });
+    assert.equal(await scalar(
+      `select broadcast_at = '${now}'::timestamptz from public.setup_deployment_jobs where id = '${claim.jobId}'::uuid;`,
+    ), "t");
     await scalar(`select public.record_setup_receipt(
       '${claim.jobId}'::uuid, '${claim.fencingToken}'::uuid, '${hash("8")}', 1, 12345,
       '${now}'::timestamptz
@@ -216,7 +239,8 @@ describe("production setup migration on disposable PostgreSQL", () => {
     assert.ok(!auditPayloads.includes(signature));
     assert.ok(!auditPayloads.includes("ciphertext"));
 
-    const terminalRegression = await dockerPsql(persistSql, { role: "agentpay_setup_worker", allowFailure: true });
+    const terminalPersistSql = persistSql.replace(originalFence, claim.fencingToken);
+    const terminalRegression = await dockerPsql(terminalPersistSql, { role: "agentpay_setup_worker", allowFailure: true });
     assert.notEqual(terminalRegression.code, 0, "completed jobs cannot regress to signed");
     assert.match(terminalRegression.stderr, /SETUP_STATE_CONFLICT/);
 
@@ -233,6 +257,37 @@ describe("production setup migration on disposable PostgreSQL", () => {
     );
     assert.notEqual(mutateBudget.code, 0, "charged sponsor reservations are immutable");
     assert.match(mutateBudget.stderr, /SETUP_AUDIT_IMMUTABLE/);
+  });
+
+  it("finalizes an exactly verified existing account without sponsor spend", async () => {
+    const existingOwner = "0x8888888888888888888888888888888888888888";
+    const existingCapability = bareHash("9");
+    const existingIntent = "setup-production-postgres-existing-0001";
+    const existingPredicted = "0x9999999999999999999999999999999999999999";
+    await scalar(`select public.create_production_setup_challenge(
+      '${existingIntent}', '${existingCapability}', '${existingOwner}', '${executor}', 'existing account typed data',
+      '${hash("a")}', '${hash("1")}', '${factory}', '${hash("2")}', '${hash("b")}',
+      '${existingPredicted}', '${hash("5")}', '${hash("6")}', '${hash("c")}',
+      '${expiresAt}'::timestamptz, '${now}'::timestamptz, '${bareHash("9")}', 60, 20
+    )::text;`, { role: "agentpay_setup_web" });
+    await scalar(`select public.consume_production_setup_admission(
+      '${existingCapability}', '${signature}', '${now}'::timestamptz
+    )::text;`, { role: "agentpay_setup_web" });
+    const claim = JSON.parse(await scalar(
+      `select public.claim_setup_deployment_job('worker-existing', '${now}'::timestamptz, 120)::text;`,
+      { role: "agentpay_setup_worker" },
+    ));
+    const recorded = JSON.parse(await scalar(`select public.record_existing_setup_account(
+      '${claim.jobId}'::uuid, '${claim.fencingToken}'::uuid, 12346, '${now}'::timestamptz
+    )::text;`, { role: "agentpay_setup_worker" }));
+    assert.equal(recorded.status, "CONFIRMING");
+    const completed = JSON.parse(await scalar(`select public.finalize_verified_setup_wallet(
+      '${claim.jobId}'::uuid, '${claim.fencingToken}'::uuid, '${now}'::timestamptz
+    )::text;`, { role: "agentpay_setup_worker" }));
+    assert.equal(completed.accountAddress, existingPredicted);
+    assert.equal(await scalar(
+      `select count(*) from public.setup_sponsor_budgets where job_id = '${claim.jobId}'::uuid;`,
+    ), "0");
   });
 
   it("rejects duplicate sponsor nonces and transaction hashes across jobs", async () => {
@@ -360,11 +415,36 @@ describe("production setup migration on disposable PostgreSQL", () => {
       assert.notEqual(forbiddenRuntime.code, 0, `${role} cannot read the web runtime readiness RPC`);
     }
 
+    const workerRuntime = JSON.parse(await scalar(
+      "select public.read_production_setup_worker_runtime_state()::text;",
+      { role: "agentpay_setup_worker" },
+    ));
+    assert.equal(workerRuntime.chainId, 196);
+    assert.equal(workerRuntime.sponsorDeployerAddress, deployer);
+    for (const role of ["anon", "agentpay_setup_web"]) {
+      const forbiddenWorkerRuntime = await dockerPsql(
+        "select public.read_production_setup_worker_runtime_state();",
+        { role, allowFailure: true },
+      );
+      assert.notEqual(forbiddenWorkerRuntime.code, 0, `${role} cannot read worker runtime readiness`);
+    }
+
     const webWorker = await dockerPsql(
       `select public.claim_setup_deployment_job('web', '${now}'::timestamptz, 60);`,
       { role: "agentpay_setup_web", allowFailure: true },
     );
     assert.notEqual(webWorker.code, 0, "web cannot execute worker RPCs");
+
+    const webExistingAccount = await dockerPsql(
+      `select public.record_existing_setup_account(
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '00000000-0000-4000-8000-000000000002'::uuid,
+        1,
+        '${now}'::timestamptz
+      );`,
+      { role: "agentpay_setup_web", allowFailure: true },
+    );
+    assert.notEqual(webExistingAccount.code, 0, "web cannot record an existing account");
 
     const workerWeb = await dockerPsql(
       `select public.read_production_setup_status('${capabilityDigest}', '${now}'::timestamptz);`,

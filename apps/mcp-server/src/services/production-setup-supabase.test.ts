@@ -67,6 +67,7 @@ describe("scoped production setup Supabase adapters", () => {
       "markBroadcastResult",
       "markManualReview",
       "persistSignedTransaction",
+      "recordExistingAccount",
       "recordReceipt",
       "reserve",
     ]);
@@ -146,6 +147,7 @@ describe("scoped production setup Supabase adapters", () => {
     const { client, calls } = clientReturning({
       claim_setup_deployment_job: {
         disposition: "CLAIMED",
+        jobStatus: "SIGNED",
         jobId: "00000000-0000-4000-8000-000000000001",
         setupIntentId: "setup-production-adapter-0001",
         tenantId: "00000000-0000-4000-8000-000000000002",
@@ -165,6 +167,10 @@ describe("scoped production setup Supabase adapters", () => {
         accountRuntimeCodeHash: `0x${"6".repeat(64)}`,
         authorizationHash: `0x${"7".repeat(64)}`,
         expiresAt: "2026-07-17T05:15:00.000Z",
+        deployerAddress: "0x4444444444444444444444444444444444444444",
+        deployerNonce: "7",
+        transactionHash: `0x${"8".repeat(64)}`,
+        rawTransaction: { ciphertext: "cipher", iv: "iv", tag: "tag", hash: "b".repeat(64) },
       },
     });
     const worker = createProductionSetupWorkerStoreFromConfig({
@@ -175,6 +181,8 @@ describe("scoped production setup Supabase adapters", () => {
     });
     const claim = await worker.claim({ workerId: "worker-1", at: "2026-07-17T05:00:00.000Z", leaseSeconds: 120 });
     assert.equal(claim?.ownerSetupSignature, `0x${"12".repeat(65)}`);
+    assert.equal(claim?.jobStatus, "SIGNED");
+    assert.equal(claim?.rawTransaction?.ciphertext, "cipher");
     assert.equal(calls[0].name, "claim_setup_deployment_job");
 
     const failingClient: ScopedProductionSetupClient = {
@@ -207,6 +215,7 @@ describe("scoped production setup Supabase adapters", () => {
       persist_setup_signed_transaction: { disposition: "SIGNED", jobId, transactionHash: txHash },
       mark_setup_broadcast_result: { disposition: "BROADCAST", jobId, status: "BROADCAST" },
       record_setup_receipt: { disposition: "RECORDED", jobId, status: "CONFIRMING" },
+      record_existing_setup_account: { disposition: "RECORDED", jobId, status: "CONFIRMING" },
       finalize_verified_setup_wallet: {
         disposition: "COMPLETED",
         jobId,
@@ -241,6 +250,7 @@ describe("scoped production setup Supabase adapters", () => {
       receiptStatus: 1,
       receiptBlockNumber: "12345",
     });
+    await worker.recordExistingAccount({ ...common, verificationBlockNumber: "12345" });
     await worker.finalize(common);
     await worker.markManualReview({ ...common, publicCode: "SETUP_RPC_AMBIGUOUS" });
 
@@ -249,6 +259,7 @@ describe("scoped production setup Supabase adapters", () => {
       "persist_setup_signed_transaction",
       "mark_setup_broadcast_result",
       "record_setup_receipt",
+      "record_existing_setup_account",
       "finalize_verified_setup_wallet",
       "mark_setup_manual_review",
     ]);
