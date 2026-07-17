@@ -8,6 +8,11 @@ import {
   assertMainnetShadowManifest,
   computeArtifactDigests,
 } from "./mainnet-shadow-manifest.mjs";
+import {
+  MAINNET_ONBOARDING_ORIGIN,
+  computeMainnetOnboardingManifestSha256,
+  validateMainnetOnboardingManifest,
+} from "./mainnet-onboarding-manifest.mjs";
 
 export const MAINNET_ACTIVATED_MANIFEST_PATH = fileURLToPath(
   new URL("../ops/manifests/xlayer-mainnet.activated.json", import.meta.url),
@@ -22,6 +27,7 @@ const HASH_PATTERN = /^0x[a-f0-9]{64}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SETUP_MODES = new Set(["OFF", "CANARY", "PUBLIC", "DRAIN"]);
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -55,6 +61,12 @@ export function buildMainnetActivatedManifest({ shadowManifest } = {}) {
     accountDeployment: "PENDING",
     executionEnabled: false,
   };
+  manifest.onboarding = {
+    setupMode: "OFF",
+    onboardingOrigin: MAINNET_ONBOARDING_ORIGIN,
+    manifestSha256: null,
+    factoryAddress: null,
+  };
 
   if (manifest.x402?.enabled !== false) {
     throw new Error("Mainnet activation must keep x402 disabled until account deployment.");
@@ -76,6 +88,26 @@ export function buildMainnetActivatedManifest({ shadowManifest } = {}) {
     throw new Error("Mainnet activation cannot provision contract.domain.verifyingContract.");
   }
 
+  return manifest;
+}
+
+export function bindMainnetActivationOnboarding({ activationManifest, onboardingManifest } = {}) {
+  if (!isRecord(activationManifest)) throw new Error("A DEPLOYED/OFF activation manifest is required.");
+  if (activationManifest.status !== "DEPLOYED" || activationManifest.executionMode !== "OFF") {
+    throw new Error("Onboarding binding requires a DEPLOYED/OFF payment activation manifest.");
+  }
+  const onboardingResult = validateMainnetOnboardingManifest(onboardingManifest, { requireFactory: true });
+  if (!onboardingResult.valid) {
+    throw new Error(`Invalid mainnet onboarding manifest: ${onboardingResult.errors.join("; ")}`);
+  }
+
+  const manifest = structuredClone(activationManifest);
+  manifest.onboarding = {
+    setupMode: onboardingManifest.setupMode,
+    onboardingOrigin: onboardingManifest.onboardingOrigin,
+    manifestSha256: computeMainnetOnboardingManifestSha256(onboardingManifest),
+    factoryAddress: onboardingManifest.factory.address,
+  };
   return manifest;
 }
 
@@ -282,6 +314,7 @@ export function validateMainnetActivationManifest(manifest, { artifactDigests } 
     add("activation.accountDeployment", "must be PENDING or DEPLOYED");
   }
   if (manifest.activation?.executionEnabled !== false) add("activation.executionEnabled", "must remain false");
+  validateActivationOnboarding(manifest.onboarding, add);
 
   if (accountDeployment === "PENDING") {
     for (const key of [
@@ -342,6 +375,37 @@ export function validateMainnetActivationManifest(manifest, { artifactDigests } 
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+function validateActivationOnboarding(onboarding, add) {
+  if (!isRecord(onboarding)) {
+    add("onboarding", "must be an object");
+    return;
+  }
+  const allowedKeys = ["factoryAddress", "manifestSha256", "onboardingOrigin", "setupMode"];
+  for (const key of Object.keys(onboarding)) {
+    if (!allowedKeys.includes(key)) add(`onboarding.${key}`, "is not allowed");
+  }
+  for (const key of allowedKeys) {
+    if (!(key in onboarding)) add(`onboarding.${key}`, "is required");
+  }
+  if (!SETUP_MODES.has(onboarding.setupMode)) {
+    add("onboarding.setupMode", "must be OFF, CANARY, PUBLIC, or DRAIN");
+  }
+  if (onboarding.onboardingOrigin !== MAINNET_ONBOARDING_ORIGIN) {
+    add("onboarding.onboardingOrigin", `must be ${MAINNET_ONBOARDING_ORIGIN}`);
+  }
+  const hasDigest = typeof onboarding.manifestSha256 === "string" && SHA256_PATTERN.test(onboarding.manifestSha256);
+  const hasFactory = typeof onboarding.factoryAddress === "string" && ADDRESS_PATTERN.test(onboarding.factoryAddress);
+  if (onboarding.manifestSha256 !== null && !hasDigest) {
+    add("onboarding.manifestSha256", "must be null or a bare lowercase SHA-256 digest");
+  }
+  if (onboarding.factoryAddress !== null && !hasFactory) {
+    add("onboarding.factoryAddress", "must be null or a valid factory address");
+  }
+  if ((onboarding.manifestSha256 === null) !== (onboarding.factoryAddress === null)) {
+    add("onboarding", "manifest digest and factory address must be bound together");
+  }
 }
 
 export async function generateMainnetActivatedManifest({ outputPath = MAINNET_ACTIVATED_MANIFEST_PATH } = {}) {

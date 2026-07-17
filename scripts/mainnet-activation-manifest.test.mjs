@@ -1,21 +1,57 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
+import { keccak256 } from "ethers";
 
 import {
   buildMainnetActivatedManifest,
   buildMainnetCanaryManifest,
   buildMainnetDeployedManifest,
+  bindMainnetActivationOnboarding,
   bindMainnetCanaryPolicy,
   computeActivationManifestSha256,
   validateMainnetActivationManifest,
 } from "./mainnet-activation-manifest.mjs";
+import {
+  MAINNET_POLICY_VERSION,
+  MAINNET_USDT0,
+  bindVerifiedFactoryDeployment,
+  buildMainnetOnboardingOffManifest,
+  computeMainnetOnboardingManifestSha256,
+} from "./mainnet-onboarding-manifest.mjs";
 import { buildMainnetShadowManifest, computeArtifactDigests } from "./mainnet-shadow-manifest.mjs";
 
 const artifactDigests = await computeArtifactDigests();
 const shadowManifest = buildMainnetShadowManifest({
   artifactDigests,
   generatedAt: "2026-07-13T00:00:00.000Z",
+});
+const onboardingRuntimeTemplate = `0x${"11".repeat(4)}${"00".repeat(32)}${"22".repeat(4)}`;
+const onboardingManifest = bindVerifiedFactoryDeployment({
+  manifest: buildMainnetOnboardingOffManifest({
+    accountArtifact: {
+      bytecode: onboardingRuntimeTemplate,
+      immutableReferences: [{ start: 16, length: 20 }],
+      creationCodeHash: `0x${"a".repeat(64)}`,
+      runtimeTemplateHash: keccak256(onboardingRuntimeTemplate),
+    },
+    sponsor: {
+      deployerAddress: "0x3333333333333333333333333333333333333333",
+      maxDeploymentsPerDay: 100,
+      maxNativeCostPerDayWei: "1000000000000000000",
+      maxGasPerDeployment: 5_000_000,
+      maxPending: 5,
+    },
+  }),
+  deployment: {
+    address: "0x1111111111111111111111111111111111111111",
+    deploymentTxHash: `0x${"2".repeat(64)}`,
+    deploymentBlock: 12_345_678,
+    runtimeCodeHash: `0x${"3".repeat(64)}`,
+    executor: "0x4444444444444444444444444444444444444444",
+    usdt0: MAINNET_USDT0,
+    policyVersion: MAINNET_POLICY_VERSION,
+  },
 });
 
 describe("X Layer mainnet activation manifest", () => {
@@ -30,7 +66,44 @@ describe("X Layer mainnet activation manifest", () => {
     assert.equal(manifest.activation.accountDeployment, "PENDING");
     assert.equal(manifest.contract.address, null);
     assert.equal(manifest.contract.domain.verifyingContract, null);
+    assert.deepEqual(manifest.onboarding, {
+      setupMode: "OFF",
+      onboardingOrigin: "https://onboard.agentpay.site",
+      manifestSha256: null,
+      factoryAddress: null,
+    });
     assert.match(computeActivationManifestSha256(manifest), /^[a-f0-9]{64}$/);
+  });
+
+  it("pins an independent onboarding manifest without changing payment execution mode", () => {
+    const activationManifest = buildMainnetActivatedManifest({ shadowManifest });
+    const bound = bindMainnetActivationOnboarding({ activationManifest, onboardingManifest });
+    const result = validateMainnetActivationManifest(bound, { artifactDigests });
+
+    assert.equal(result.valid, true, result.errors.join("; "));
+    assert.equal(bound.executionMode, "OFF");
+    assert.equal(bound.x402.enabled, false);
+    assert.deepEqual(bound.onboarding, {
+      setupMode: "OFF",
+      onboardingOrigin: "https://onboard.agentpay.site",
+      manifestSha256: computeMainnetOnboardingManifestSha256(onboardingManifest),
+      factoryAddress: onboardingManifest.factory.address,
+    });
+  });
+
+  it("rejects invalid onboarding metadata independently from payment execution", () => {
+    const manifest = bindMainnetActivationOnboarding({
+      activationManifest: buildMainnetActivatedManifest({ shadowManifest }),
+      onboardingManifest,
+    });
+    manifest.onboarding.setupMode = "ENABLED";
+    manifest.onboarding.manifestSha256 = "not-a-digest";
+
+    const result = validateMainnetActivationManifest(manifest, { artifactDigests });
+    assert.equal(result.valid, false);
+    assert.match(result.errors.join("; "), /onboarding\.setupMode/);
+    assert.match(result.errors.join("; "), /onboarding\.manifestSha256/);
+    assert.equal(manifest.executionMode, "OFF");
   });
 
   it("rejects activation drift that could silently enable execution or deployment", () => {
