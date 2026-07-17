@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 const expectedKeys = [
   "SUPABASE_URL",
+  "SUPABASE_PUBLISHABLE_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "XLAYER_RPC_URL",
   "XLAYER_MAINNET_RPC_URL",

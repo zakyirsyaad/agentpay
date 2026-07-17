@@ -21,8 +21,8 @@ const expectedPackageNames = new Map([
 ]);
 const expectedVersions = new Map([
   ["@agentpay-ai/shared", "0.1.4"],
-  ["@agentpay-ai/mcp-server", "0.1.12"],
-  ["@agentpay-ai/setup-web", "0.1.13"],
+  ["@agentpay-ai/mcp-server", "0.1.13"],
+  ["@agentpay-ai/setup-web", "0.1.14"],
   ["@agentpay-ai/skill", "0.1.7"],
   ["@agentpay-ai/agentpay", "0.1.19"],
 ]);
@@ -202,7 +202,17 @@ describe("publishable AgentPay package manifests", () => {
     assert.ok(shared.files.includes("src/mainnet-wallet-setup.ts"));
     assert.ok(mcp.files.includes("src/services/production-setup.ts"));
     assert.ok(mcp.files.includes("src/services/production-setup-supabase.ts"));
-    assert.ok(setupWeb.files.includes("src/onboarding"));
-    assert.ok(setupWeb.files.includes("src/worker"));
+    assert.ok(setupWeb.files.some((filePattern) => filePattern.startsWith("src/onboarding/")));
+    assert.ok(setupWeb.files.some((filePattern) => filePattern.startsWith("src/worker/")));
+  });
+
+  it("lists production setup-web sources explicitly so tests stay out of the tarball", async () => {
+    const manifest = await readPackageJson("apps/setup-web");
+
+    assert.equal(manifest.files.includes("src/onboarding"), false);
+    assert.equal(manifest.files.includes("src/worker"), false);
+    assert.ok(manifest.files.includes("src/onboarding/runtime.ts"));
+    assert.ok(manifest.files.includes("src/worker/runtime.ts"));
+    assert.ok(manifest.files.every((filePattern) => !filePattern.includes(".test.")));
   });
 });

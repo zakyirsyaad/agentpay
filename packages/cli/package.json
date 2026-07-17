@@ -20,8 +20,8 @@
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentpay-ai/mcp-server": "0.1.12",
-    "@agentpay-ai/setup-web": "0.1.13",
+    "@agentpay-ai/mcp-server": "0.1.13",
+    "@agentpay-ai/setup-web": "0.1.14",
     "@agentpay-ai/skill": "0.1.7",
     "tsx": "^4.22.5"
   }

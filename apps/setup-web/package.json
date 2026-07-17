@@ -1,6 +1,6 @@
 {
   "name": "@agentpay-ai/setup-web",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -11,8 +11,17 @@
     "src/runtime.ts",
     "src/server.ts",
     "src/payment-review.ts",
-    "src/onboarding",
-    "src/worker",
+    "src/onboarding/authorization.ts",
+    "src/onboarding/browser-transaction.ts",
+    "src/onboarding/page.ts",
+    "src/onboarding/runtime.ts",
+    "src/onboarding/server.ts",
+    "src/onboarding/start.ts",
+    "src/worker/runtime.ts",
+    "src/worker/setup-account-verifier.ts",
+    "src/worker/setup-deployment-worker.ts",
+    "src/worker/setup-transaction.ts",
+    "src/worker/start.ts",
     "src/services/account-deployer.ts",
     "src/services/complete-wallet-setup.ts",
     "src/start.ts"
@@ -29,7 +38,7 @@
     "typecheck": "tsc -p ../../tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentpay-ai/mcp-server": "0.1.12",
+    "@agentpay-ai/mcp-server": "0.1.13",
     "@agentpay-ai/shared": "0.1.4",
     "ethers": "^6.17.0",
     "zod": "^4.4.3"

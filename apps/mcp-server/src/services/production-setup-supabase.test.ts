@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
+import { createClient } from "@supabase/supabase-js";
 
 import {
   ProductionSetupStoreError,
@@ -85,6 +86,33 @@ describe("scoped production setup Supabase adapters", () => {
       assert.deepEqual(client.options.auth, { autoRefreshToken: false, persistSession: false });
       assert.equal(await client.options.accessToken(), client.token);
     }
+  });
+
+  it("sends the publishable API key separately from the scoped bearer token", async () => {
+    const scopedToken = token("agentpay_setup_web", future);
+    let headers: Headers | undefined;
+    const store = createProductionSetupWebStoreFromConfig({
+      ...baseConfig,
+      token: scopedToken,
+      rateLimit,
+      clientFactory: (url, apiKey, options) => createClient(url, apiKey, {
+        ...options,
+        global: {
+          fetch: async (_input, init) => {
+            headers = new Headers(init?.headers);
+            return new Response(JSON.stringify({ expiredSetups: 0, deletedRateBuckets: 0 }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      }) as unknown as ScopedProductionSetupClient,
+    });
+
+    await store.prune({ at: "2026-07-17T10:00:00.000Z" });
+
+    assert.equal(headers?.get("apikey"), publishableKey);
+    assert.equal(headers?.get("authorization"), `Bearer ${scopedToken}`);
   });
 
   it("rejects secret, service-role, and missing project API keys", () => {
