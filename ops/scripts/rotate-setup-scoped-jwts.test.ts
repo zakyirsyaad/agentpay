@@ -387,11 +387,13 @@ test("production probes fail closed on unexpected authorization status without r
 });
 
 test("production local health transport preserves the explicit Host header", async () => {
+  let requestCount = 0;
   const server = createServer((request, response) => {
+    requestCount += 1;
     const authorized = request.headers.host === "onboard.agentpay.site"
       && request.headers["x-agentpay-proxy-identity"] === trustedProxyIdentity
       && request.headers["x-forwarded-proto"] === "https";
-    response.writeHead(authorized ? 200 : 404).end();
+    response.writeHead(authorized && requestCount >= 3 ? 200 : 503).end();
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -411,9 +413,39 @@ test("production local health transport preserves the explicit Host header", asy
         "x-forwarded-proto": "https",
       },
     );
+    assert.equal(requestCount, 3);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("production public readiness retries transient HTTP failures", async () => {
+  let requestCount = 0;
+  const fetchImplementation: typeof fetch = async () => {
+    requestCount += 1;
+    return { status: requestCount >= 3 ? 200 : 503 } as Response;
+  };
+  const dependencies = createProductionRotationDependencies(config, { fetchImplementation });
+
+  await dependencies.requireHttpStatus(config.publicReadyUrl, 200);
+
+  assert.equal(requestCount, 3);
+});
+
+test("production readiness fails closed without retrying a non-transient status", async () => {
+  let requestCount = 0;
+  const fetchImplementation: typeof fetch = async () => {
+    requestCount += 1;
+    return { status: 404 } as Response;
+  };
+  const dependencies = createProductionRotationDependencies(config, { fetchImplementation });
+
+  await assert.rejects(
+    () => dependencies.requireHttpStatus(config.publicReadyUrl, 200),
+    /HTTP 404/,
+  );
+
+  assert.equal(requestCount, 1);
 });
 
 test("CLI accepts only one absolute config path and never accepts secrets as arguments", () => {

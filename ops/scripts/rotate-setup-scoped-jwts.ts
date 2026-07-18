@@ -42,6 +42,10 @@ const CONFIGURATION_MODE = 0o600;
 const BACKUP_MODE = 0o600;
 const STATE_DIRECTORY_MODE = 0o700;
 const HTTP_TIMEOUT_MS = 10_000;
+const READINESS_REQUEST_TIMEOUT_MS = 2_000;
+const READINESS_RETRY_DELAY_MS = 100;
+const READINESS_MAX_ATTEMPTS = 100;
+const RETRYABLE_READINESS_STATUSES = new Set([502, 503, 504]);
 
 export interface PrivateEnvironmentFile {
   readonly path: string;
@@ -530,23 +534,43 @@ async function requireHttpStatus(
   status: number,
   headers?: Readonly<Record<string, string>>,
 ): Promise<void> {
-  if (headers && url.protocol === "http:" && url.hostname === "127.0.0.1") {
-    const localStatus = await requestDirectHttpStatus(url, headers);
-    if (localStatus !== status) {
-      throw new Error(`Readiness endpoint returned HTTP ${localStatus}.`);
+  let lastStatus: number | undefined;
+  for (let attempt = 1; attempt <= READINESS_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const actualStatus = headers && url.protocol === "http:" && url.hostname === "127.0.0.1"
+        ? await requestDirectHttpStatus(url, headers)
+        : await requestFetchHttpStatus(fetchImplementation, url, headers);
+      if (actualStatus === status) return;
+      if (!RETRYABLE_READINESS_STATUSES.has(actualStatus)) {
+        throw new Error(`Readiness endpoint returned HTTP ${actualStatus}.`);
+      }
+      lastStatus = actualStatus;
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Readiness endpoint returned HTTP ")) {
+        throw error;
+      }
     }
-    return;
+    if (attempt < READINESS_MAX_ATTEMPTS) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, READINESS_RETRY_DELAY_MS));
+    }
   }
+  if (lastStatus !== undefined) throw new Error(`Readiness endpoint returned HTTP ${lastStatus}.`);
+  throw new Error("Readiness endpoint request failed.");
+}
+
+async function requestFetchHttpStatus(
+  fetchImplementation: typeof fetch,
+  url: URL,
+  headers?: Readonly<Record<string, string>>,
+): Promise<number> {
   const response = await fetchImplementation(url, {
     method: "GET",
     headers,
     redirect: "error",
     cache: "no-store",
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
   });
-  if (response.status !== status) {
-    throw new Error(`Readiness endpoint returned HTTP ${response.status}.`);
-  }
+  return response.status;
 }
 
 async function requestDirectHttpStatus(
@@ -559,7 +583,10 @@ async function requestDirectHttpStatus(
       response.resume();
       resolve(status);
     });
-    request.setTimeout(HTTP_TIMEOUT_MS, () => request.destroy(new Error("Local readiness request timed out.")));
+    request.setTimeout(
+      READINESS_REQUEST_TIMEOUT_MS,
+      () => request.destroy(new Error("Local readiness request timed out.")),
+    );
     request.once("error", reject);
     request.end();
   });
