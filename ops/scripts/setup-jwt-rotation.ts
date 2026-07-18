@@ -231,6 +231,14 @@ export function validateApplicationEnvironment(
   return Object.freeze({ token, mode: mode as "OFF" | "CANARY" | "PUBLIC" | "DRAIN" });
 }
 
+export function readTrustedProxyIdentity(environmentText: string): string {
+  const identity = parseStrictEnvironment(environmentText).get("AGENTPAY_TRUSTED_PROXY_IDENTITY") ?? "";
+  if (!/^[A-Za-z0-9_-]{32,256}$/u.test(identity)) {
+    throw new Error("Trusted proxy identity is missing or invalid.");
+  }
+  return identity;
+}
+
 export function parseRotatorConfiguration(text: string): RotatorConfiguration {
   const values = parseStrictEnvironment(text);
   for (const key of values.keys()) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { test } from "node:test";
 
 import {
@@ -17,6 +18,7 @@ import {
 } from "./rotate-setup-scoped-jwts.ts";
 
 const signingSecret = "test-only-signing-secret-with-at-least-32-bytes";
+const trustedProxyIdentity = "test-only-trusted-proxy-identity-with-32-bytes";
 const config = parseRotatorConfiguration(`
 AGENTPAY_ROTATOR_SUPABASE_URL=https://zcwsmivbgcrfyrvfptxk.supabase.co
 AGENTPAY_ROTATOR_SUPABASE_PUBLISHABLE_KEY=sb_publishable_agentpay_test_key_1234567890
@@ -41,6 +43,7 @@ const webFile: PrivateEnvironmentFile = Object.freeze({
     "AGENTPAY_SETUP_MODE=PUBLIC",
     `SUPABASE_URL=${config.supabaseUrl}`,
     "AGENTPAY_SETUP_WEB_TOKEN=old-web",
+    `AGENTPAY_TRUSTED_PROXY_IDENTITY=${trustedProxyIdentity}`,
     "",
   ].join("\n"),
   uid: 0,
@@ -144,6 +147,33 @@ test("rotates both roles, activates worker before web, and verifies readiness", 
     "prune", "unlock",
   ]);
   assert.equal(result.expiresAt, 1_800_006_900);
+});
+
+test("authenticates the direct local health probe with the configured trusted proxy identity", async () => {
+  const requests: Array<Readonly<{
+    url: string;
+    headers: Readonly<Record<string, string>> | undefined;
+  }>> = [];
+  const { dependencies } = createDependencies({
+    async requireHttpStatus(url, _status, headers) {
+      requests.push(Object.freeze({ url: url.toString(), headers }));
+    },
+  });
+
+  await rotateSetupScopedJwts(config, new Hs256SetupJwtSigner(signingSecret), dependencies);
+
+  assert.deepEqual(requests, [
+    {
+      url: config.localHealthUrl.toString(),
+      headers: {
+        host: "onboard.agentpay.site",
+        "x-agentpay-proxy-identity": trustedProxyIdentity,
+        "x-forwarded-proto": "https",
+      },
+    },
+    { url: config.publicHealthUrl.toString(), headers: undefined },
+    { url: config.publicReadyUrl.toString(), headers: undefined },
+  ]);
 });
 
 test("skips a concurrent rotation without reading or changing state", async () => {
@@ -354,6 +384,36 @@ test("production probes fail closed on unexpected authorization status without r
       return true;
     },
   );
+});
+
+test("production local health transport preserves the explicit Host header", async () => {
+  const server = createServer((request, response) => {
+    const authorized = request.headers.host === "onboard.agentpay.site"
+      && request.headers["x-agentpay-proxy-identity"] === trustedProxyIdentity
+      && request.headers["x-forwarded-proto"] === "https";
+    response.writeHead(authorized ? 200 : 404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  try {
+    const dependencies = createProductionRotationDependencies(config);
+    await dependencies.requireHttpStatus(
+      new URL(`http://127.0.0.1:${address.port}/healthz`),
+      200,
+      {
+        host: "onboard.agentpay.site",
+        "x-agentpay-proxy-identity": trustedProxyIdentity,
+        "x-forwarded-proto": "https",
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test("CLI accepts only one absolute config path and never accepts secrets as arguments", () => {

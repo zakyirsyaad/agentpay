@@ -1,5 +1,6 @@
 import { constants, type Stats } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { request as requestHttp } from "node:http";
 import {
   chmod,
   chown,
@@ -25,6 +26,7 @@ import {
   WORKER_TOKEN_ENV_KEY,
   assertPrivateFileMetadata,
   parseRotatorConfiguration,
+  readTrustedProxyIdentity,
   redactSensitiveText,
   replaceScopedToken,
   validateApplicationEnvironment,
@@ -103,7 +105,11 @@ export interface RotationDependencies {
   }>) => Promise<void>;
   readonly restartService: (name: string) => Promise<void>;
   readonly requireServiceActive: (name: string) => Promise<void>;
-  readonly requireHttpStatus: (url: URL, status: number) => Promise<void>;
+  readonly requireHttpStatus: (
+    url: URL,
+    status: number,
+    headers?: Readonly<Record<string, string>>,
+  ) => Promise<void>;
   readonly cleanupStage: (path: string) => Promise<void>;
   readonly log: (event: RotationLogEvent) => void;
 }
@@ -137,6 +143,7 @@ export async function rotateSetupScopedJwts(
     const workerFile = await dependencies.readPrivateFile(config.workerEnvironmentPath, EXPECTED_APPLICATION_MODE);
     validateApplicationEnvironment(webFile.text, WEB_ROLE, config.supabaseUrl);
     validateApplicationEnvironment(workerFile.text, WORKER_ROLE, config.supabaseUrl);
+    const trustedProxyIdentity = readTrustedProxyIdentity(webFile.text);
     dependencies.log(logEvent("read", "passed"));
 
     const issuedAt = dependencies.nowSeconds();
@@ -190,7 +197,11 @@ export async function rotateSetupScopedJwts(
     await dependencies.restartService(config.webService);
     await dependencies.requireServiceActive(config.webService);
 
-    await dependencies.requireHttpStatus(config.localHealthUrl, 200);
+    await dependencies.requireHttpStatus(config.localHealthUrl, 200, Object.freeze({
+      host: "onboard.agentpay.site",
+      "x-agentpay-proxy-identity": trustedProxyIdentity,
+      "x-forwarded-proto": "https",
+    }));
     await dependencies.requireHttpStatus(config.publicHealthUrl, 200);
     await dependencies.requireHttpStatus(config.publicReadyUrl, 200);
     await probeBothRoles(dependencies, "post-install", webToken, workerToken);
@@ -287,7 +298,7 @@ export function createProductionRotationDependencies(
     probeRoleIsolation: (input) => probeRoleIsolation(config, fetchImplementation, input),
     restartService: (name) => restartService(serviceAllowlist, name),
     requireServiceActive: (name) => requireServiceActive(serviceAllowlist, name),
-    requireHttpStatus: (url, status) => requireHttpStatus(fetchImplementation, url, status),
+    requireHttpStatus: (url, status, headers) => requireHttpStatus(fetchImplementation, url, status, headers),
     cleanupStage,
     log: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
   };
@@ -513,9 +524,22 @@ async function requireServiceActive(allowlist: ReadonlySet<string>, name: string
   await execFile("/usr/bin/systemctl", ["is-active", "--quiet", name], { timeout: 10_000 });
 }
 
-async function requireHttpStatus(fetchImplementation: typeof fetch, url: URL, status: number): Promise<void> {
+async function requireHttpStatus(
+  fetchImplementation: typeof fetch,
+  url: URL,
+  status: number,
+  headers?: Readonly<Record<string, string>>,
+): Promise<void> {
+  if (headers && url.protocol === "http:" && url.hostname === "127.0.0.1") {
+    const localStatus = await requestDirectHttpStatus(url, headers);
+    if (localStatus !== status) {
+      throw new Error(`Readiness endpoint returned HTTP ${localStatus}.`);
+    }
+    return;
+  }
   const response = await fetchImplementation(url, {
     method: "GET",
+    headers,
     redirect: "error",
     cache: "no-store",
     signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
@@ -523,6 +547,22 @@ async function requireHttpStatus(fetchImplementation: typeof fetch, url: URL, st
   if (response.status !== status) {
     throw new Error(`Readiness endpoint returned HTTP ${response.status}.`);
   }
+}
+
+async function requestDirectHttpStatus(
+  url: URL,
+  headers: Readonly<Record<string, string>>,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const request = requestHttp(url, { method: "GET", headers }, (response) => {
+      const status = response.statusCode ?? 0;
+      response.resume();
+      resolve(status);
+    });
+    request.setTimeout(HTTP_TIMEOUT_MS, () => request.destroy(new Error("Local readiness request timed out.")));
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 async function cleanupStage(path: string): Promise<void> {

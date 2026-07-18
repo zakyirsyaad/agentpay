@@ -10,6 +10,7 @@ import {
   WORKER_TOKEN_ENV_KEY,
   assertPrivateFileMetadata,
   parseRotatorConfiguration,
+  readTrustedProxyIdentity,
   redactSensitiveText,
   replaceScopedToken,
   validateApplicationEnvironment,
@@ -187,6 +188,20 @@ test("validates the exact production application boundary before replacement", (
       "https://zcwsmivbgcrfyrvfptxk.supabase.co"),
     /Forbidden credential|exactly one/,
   );
+});
+
+test("accepts only one strong trusted proxy identity from the web environment", () => {
+  const environment = [
+    "AGENTPAY_TRUSTED_PROXY_IDENTITY=trusted_proxy_identity_with_at_least_32_bytes",
+    "",
+  ].join("\n");
+  assert.equal(
+    readTrustedProxyIdentity(environment),
+    "trusted_proxy_identity_with_at_least_32_bytes",
+  );
+  assert.throws(() => readTrustedProxyIdentity("AGENTPAY_SETUP_MODE=PUBLIC\n"), /missing or invalid/i);
+  assert.throws(() => readTrustedProxyIdentity("AGENTPAY_TRUSTED_PROXY_IDENTITY=short\n"), /invalid/i);
+  assert.throws(() => readTrustedProxyIdentity(`${environment}${environment}`), /duplicate/i);
 });
 
 test("requires regular root-owned private files with their exact modes", () => {
