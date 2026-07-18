@@ -25,7 +25,8 @@
     "test:e2e:onboarding": "playwright test --config apps/setup-web/playwright.config.ts --grep \"production onboarding\"",
     "test:contracts": "cd contracts && forge test",
     "test:db:setup": "node --test scripts/production-setup-postgres.test.mjs",
-    "test:scripts": "node --test scripts/*.test.mjs && tsx --test \"scripts/*.test.ts\"",
+    "test:ops": "tsx --test \"ops/scripts/*.test.ts\"",
+    "test:scripts": "node --test scripts/*.test.mjs && tsx --test \"scripts/*.test.ts\" && npm run test:ops",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {

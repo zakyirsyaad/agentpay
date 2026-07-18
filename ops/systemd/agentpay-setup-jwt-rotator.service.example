@@ -1,0 +1,37 @@
+[Unit]
+Description=AgentPay scoped setup JWT rotator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/agentpay
+RuntimeDirectory=agentpay
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/env -S node --import tsx /opt/agentpay/ops/scripts/rotate-setup-scoped-jwts.ts --config /opt/agentpay/private/setup-jwt-rotator.env
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SocketBindDeny=any
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+ReadOnlyPaths=/opt/agentpay/ops /opt/agentpay/releases
+ReadWritePaths=/opt/agentpay/private /run/agentpay
+TimeoutStartSec=2min

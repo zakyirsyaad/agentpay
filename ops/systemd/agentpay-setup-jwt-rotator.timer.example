@@ -1,0 +1,13 @@
+[Unit]
+Description=Rotate AgentPay scoped setup JWTs every 45 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=45min
+Persistent=true
+RandomizedDelaySec=2min
+AccuracySec=30s
+Unit=agentpay-setup-jwt-rotator.service
+
+[Install]
+WantedBy=timers.target
